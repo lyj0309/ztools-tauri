@@ -25,6 +25,36 @@ const MAX_PLUGIN_FILES: usize = 5_000;
 const MAX_PLUGIN_BYTES: u64 = 100 * 1024 * 1024;
 const MAX_MARKET_ARCHIVE_BYTES: usize = 50 * 1024 * 1024;
 const MARKET_API_BASE: &str = "https://z.zosen.link/api/market";
+type BundledPluginFile = (&'static str, &'static [u8]);
+type BundledPlugin = (&'static str, &'static [BundledPluginFile]);
+const BUNDLED_PLUGIN_FILES: &[BundledPlugin] = &[
+    (
+        "setting",
+        &[
+            (
+                "plugin.json",
+                include_bytes!("../resources/default-plugins/setting/plugin.json"),
+            ),
+            (
+                "index.html",
+                include_bytes!("../resources/default-plugins/setting/index.html"),
+            ),
+        ],
+    ),
+    (
+        "system",
+        &[
+            (
+                "plugin.json",
+                include_bytes!("../resources/default-plugins/system/plugin.json"),
+            ),
+            (
+                "index.html",
+                include_bytes!("../resources/default-plugins/system/index.html"),
+            ),
+        ],
+    ),
+];
 
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -65,6 +95,7 @@ pub(crate) struct InstalledPlugin {
     pub(crate) compatibility: String,
     pub(crate) compatibility_notes: Vec<String>,
     pub(crate) development: bool,
+    pub(crate) built_in: bool,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -166,6 +197,25 @@ impl PluginRuntime {
             market_installs: Mutex::new(HashMap::new()),
             development_watchers: Mutex::new(HashMap::new()),
         })
+    }
+
+    /// 把编译进可执行文件的默认插件发布到用户插件目录，并修复缺失或损坏的内置文件。
+    pub(crate) fn ensure_bundled_plugins(&self) -> Result<(), String> {
+        for (plugin_name, files) in BUNDLED_PLUGIN_FILES {
+            let directory = self.root.join(plugin_name);
+            fs::create_dir_all(&directory)
+                .map_err(|error| format!("无法创建内置插件 {plugin_name}：{error}"))?;
+
+            // 每次启动都对照内嵌资源，确保升级和误删后能恢复到当前宿主版本。
+            for (relative, contents) in *files {
+                write_bundled_file(&directory.join(relative), contents)?;
+            }
+            let manifest = read_manifest(&directory)?;
+            if manifest.name != *plugin_name {
+                return Err(format!("内置插件 {plugin_name} 的 manifest 名称不一致"));
+            }
+        }
+        Ok(())
     }
 
     /// 注册一项市场安装，并返回供下载循环检查的取消标记。
@@ -308,6 +358,9 @@ impl PluginRuntime {
             return Err("当前安装器只接受已经解压的插件目录".to_owned());
         }
         let manifest = read_manifest(&source)?;
+        if is_bundled_plugin(&manifest.name) {
+            return Err("内置插件由 ZTools 随包维护，不能从本地或市场覆盖".to_owned());
+        }
         let nonce = now_millis();
         let staging = self
             .root
@@ -358,6 +411,9 @@ impl PluginRuntime {
     /// 删除指定插件目录，拒绝不符合 manifest 名称规则的路径输入。
     pub(crate) fn uninstall(&self, plugin_name: &str) -> Result<(), String> {
         validate_plugin_name(plugin_name)?;
+        if is_bundled_plugin(plugin_name) {
+            return Err("内置插件不能卸载".to_owned());
+        }
         let target = self.root.join(plugin_name);
         if !target.is_dir() {
             return Err("插件不存在".to_owned());
@@ -543,6 +599,13 @@ pub(crate) fn plugin_root() -> PathBuf {
         .unwrap_or_else(std::env::temp_dir)
         .join("top.ztools.launcher")
         .join("plugins")
+}
+
+/// 判断名称是否属于随可执行文件分发且由宿主维护的默认插件。
+pub(crate) fn is_bundled_plugin(plugin_name: &str) -> bool {
+    BUNDLED_PLUGIN_FILES
+        .iter()
+        .any(|(name, _)| *name == plugin_name)
 }
 
 /// 校验一个插件根目录中的全部正式插件并返回有效插件数量。
@@ -1233,7 +1296,32 @@ fn plugin_summary(manifest: &PluginManifest, directory: &Path) -> InstalledPlugi
         compatibility: compatibility.to_owned(),
         compatibility_notes: notes,
         development: false,
+        built_in: is_bundled_plugin(&manifest.name),
     }
+}
+
+/// 仅在内容变化时写入内嵌插件文件，减少每次启动产生的无意义磁盘修改。
+fn write_bundled_file(path: &Path, contents: &[u8]) -> Result<(), String> {
+    if fs::read(path).is_ok_and(|current| current == contents) {
+        return Ok(());
+    }
+
+    // 先写同目录临时文件，完整落盘后再发布，避免留下半写入的插件入口。
+    let temporary = path.with_extension(format!(
+        "{}.bundled-tmp",
+        path.extension()
+            .and_then(|extension| extension.to_str())
+            .unwrap_or("file")
+    ));
+    fs::write(&temporary, contents)
+        .map_err(|error| format!("无法写入内置插件临时文件 {}：{error}", temporary.display()))?;
+    if path.exists() {
+        fs::remove_file(path)
+            .map_err(|error| format!("无法更新内置插件文件 {}：{error}", path.display()))?;
+    }
+    fs::rename(&temporary, path)
+        .map_err(|error| format!("无法发布内置插件文件 {}：{error}", path.display()))?;
+    Ok(())
 }
 
 /// 复制插件文件树，并限制符号链接、文件数量和解压后总体积。
@@ -1994,6 +2082,39 @@ mod tests {
             ),
         )
         .expect("fixture manifest should be writable");
+    }
+
+    /// 验证空数据目录会得到两个默认插件，且内嵌文件能在损坏后自动恢复。
+    #[test]
+    fn installs_and_repairs_bundled_plugins() {
+        let root = fixture_root("bundled-root");
+        let runtime = PluginRuntime::new(root.clone()).expect("runtime should open");
+        runtime
+            .ensure_bundled_plugins()
+            .expect("bundled plugins should install");
+
+        let plugins = runtime
+            .installed_plugins()
+            .expect("bundled plugins should list");
+        assert_eq!(plugins.len(), 2);
+        assert!(plugins.iter().all(|plugin| plugin.built_in));
+        assert!(plugins.iter().any(|plugin| plugin.name == "setting"));
+        assert!(plugins.iter().any(|plugin| plugin.name == "system"));
+        assert!(runtime.uninstall("setting").is_err());
+
+        // 模拟用户目录中的 manifest 被截断，再次启动应恢复编译时版本。
+        fs::write(root.join("system/plugin.json"), b"broken")
+            .expect("bundled manifest should be mutable in fixture");
+        runtime
+            .ensure_bundled_plugins()
+            .expect("bundled plugins should repair");
+        assert_eq!(
+            read_manifest(&root.join("system"))
+                .expect("repaired manifest should load")
+                .title,
+            "系统"
+        );
+        fs::remove_dir_all(root).expect("runtime fixture should clean up");
     }
 
     /// 验证目录安装使用 staging 发布，并允许新版本原子替换旧版本。

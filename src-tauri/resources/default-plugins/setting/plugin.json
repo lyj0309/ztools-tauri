@@ -1,0 +1,39 @@
+{
+  "name": "setting",
+  "title": "设置",
+  "description": "ZTools 内置设置插件",
+  "version": "1.0.0",
+  "main": "index.html",
+  "features": [
+    {
+      "code": "general",
+      "explain": "通用设置",
+      "cmds": ["设置", "通用设置", "Settings", "General Settings"]
+    },
+    {
+      "code": "appearance",
+      "explain": "外观设置",
+      "cmds": ["外观设置", "主题", "Appearance", "Theme"]
+    },
+    {
+      "code": "data",
+      "explain": "数据与本地启动项",
+      "cmds": ["我的数据", "数据设置", "备份", "恢复", "Data"]
+    },
+    {
+      "code": "plugins",
+      "explain": "已安装插件",
+      "cmds": ["已安装插件", "插件设置", "Plugins"]
+    },
+    {
+      "code": "market",
+      "explain": "插件市场",
+      "cmds": ["插件市场", "安装插件", "Plugin Market"]
+    },
+    {
+      "code": "services",
+      "explain": "同步、更新和系统服务",
+      "cmds": ["服务设置", "同步", "更新", "Services"]
+    }
+  ]
+}

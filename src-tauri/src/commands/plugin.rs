@@ -1,6 +1,6 @@
 use std::{fs, path::PathBuf};
 
-use tauri::{AppHandle, Emitter, State, WebviewWindow};
+use tauri::{AppHandle, Emitter, Manager, State, WebviewWindow};
 use tauri_plugin_notification::{NotificationExt, PermissionState};
 
 #[derive(Debug, serde::Serialize)]
@@ -181,6 +181,25 @@ pub(crate) fn launch_plugin_feature(
     app: AppHandle,
     runtime: State<'_, PluginRuntime>,
 ) -> Result<(), String> {
+    if plugin_name == "setting" {
+        let section = match feature_code.as_str() {
+            "general" | "appearance" | "data" | "plugins" | "market" | "services" => feature_code,
+            _ => return Err("未知的内置设置功能".to_owned()),
+        };
+        // 设置插件复用主窗口原生设置页，避免再装一份前端和 Node 依赖。
+        app.emit_to("main", "open-settings-section", section)
+            .map_err(|error| error.to_string())?;
+        crate::commands::launcher::show_main_window(&app);
+        return Ok(());
+    }
+    if plugin_name == "system" {
+        // 系统插件只转发 manifest 中声明的固定命令，由 Rust 白名单完成最终校验。
+        crate::commands::system::run_system_command(feature_code, app.clone())?;
+        if let Some(window) = app.get_webview_window("main") {
+            window.hide().map_err(|error| error.to_string())?;
+        }
+        return Ok(());
+    }
     let kind = match payload.as_ref() {
         Some(serde_json::Value::Array(_)) => "files",
         Some(serde_json::Value::String(value)) if !value.is_empty() => "regex",

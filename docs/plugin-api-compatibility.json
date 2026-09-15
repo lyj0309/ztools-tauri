@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "hostVersion": "0.1.1",
+  "hostVersion": "0.1.2",
   "runtime": {
     "node": false,
     "electron": false,

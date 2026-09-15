@@ -1,0 +1,39 @@
+{
+  "name": "system",
+  "title": "系统",
+  "description": "ZTools 内置系统命令插件",
+  "version": "1.0.0",
+  "main": "index.html",
+  "features": [
+    {
+      "code": "open-home",
+      "explain": "打开用户主目录",
+      "cmds": ["打开主目录", "用户目录", "Home"]
+    },
+    {
+      "code": "open-downloads",
+      "explain": "打开下载目录",
+      "cmds": ["打开下载目录", "下载文件夹", "Downloads"]
+    },
+    {
+      "code": "open-app-data",
+      "explain": "打开 ZTools 数据目录",
+      "cmds": ["打开数据目录", "ZTools 数据", "App Data"]
+    },
+    {
+      "code": "open-plugins",
+      "explain": "打开插件目录",
+      "cmds": ["打开插件目录", "插件文件夹", "Plugin Directory"]
+    },
+    {
+      "code": "open-temp",
+      "explain": "打开系统临时目录",
+      "cmds": ["打开临时目录", "临时文件夹", "Temp"]
+    },
+    {
+      "code": "lock-screen",
+      "explain": "锁定当前屏幕",
+      "cmds": ["锁屏", "锁定屏幕", "Lock Screen"]
+    }
+  ]
+}

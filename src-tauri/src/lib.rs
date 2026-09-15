@@ -139,7 +139,13 @@ pub fn run() {
             let store = Store::open(&database_path).map_err(io::Error::other)?;
             let settings = store.settings().map_err(io::Error::other)?;
             app.manage(AppState::new(store));
-            app.manage(plugin::PluginRuntime::new(plugin_root.clone()).map_err(io::Error::other)?);
+            let plugin_runtime =
+                plugin::PluginRuntime::new(plugin_root.clone()).map_err(io::Error::other)?;
+            // 用户首次启动或升级后先发布随包默认插件，再开放前端插件列表查询。
+            plugin_runtime
+                .ensure_bundled_plugins()
+                .map_err(io::Error::other)?;
+            app.manage(plugin_runtime);
             app.manage(services::BackgroundServices::start(app.handle().clone()));
 
             // 启动时让系统注册状态与持久化设置重新一致。

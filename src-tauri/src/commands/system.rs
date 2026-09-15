@@ -88,6 +88,9 @@ pub(crate) async fn restore_backup(
     .await
     .map_err(|error| format!("恢复任务异常结束：{error}"))??;
 
+    // 旧备份可能不含当前版本默认插件，恢复完成后立即补齐内嵌副本。
+    runtime.ensure_bundled_plugins()?;
+
     // 数据恢复后同步当前进程持有的全局快捷键和开机启动状态。
     let settings = app
         .state::<AppState>()

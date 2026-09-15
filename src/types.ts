@@ -102,6 +102,7 @@ export interface InstalledPlugin {
   compatibility: 'native-webview' | 'adapted' | 'needs-adaptation'
   compatibilityNotes: string[]
   development: boolean
+  builtIn: boolean
 }
 
 export interface MarketPlugin {

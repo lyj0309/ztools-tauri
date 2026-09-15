@@ -62,9 +62,8 @@ const refreshing = ref(false)
 const launchingId = ref<string | null>(null)
 const errorMessage = ref('')
 const settingsOpen = ref(false)
-const settingsSection = ref<'general' | 'appearance' | 'data' | 'plugins' | 'market' | 'services'>(
-  'general'
-)
+type SettingsSection = 'general' | 'appearance' | 'data' | 'plugins' | 'market' | 'services'
+const settingsSection = ref<SettingsSection>('general')
 const activeMode = ref<'apps' | 'plugins' | 'clipboard' | 'files'>('apps')
 const droppedPaths = ref<string[]>([])
 const dragActive = ref(false)
@@ -75,6 +74,7 @@ let unlistenApplications: UnlistenFn | undefined
 let unlistenPluginFeatures: UnlistenFn | undefined
 let unlistenMarketProgress: UnlistenFn | undefined
 let unlistenPluginDevelopment: UnlistenFn | undefined
+let unlistenOpenSettings: UnlistenFn | undefined
 const serviceBusy = ref('')
 const serviceMessage = ref('')
 const updateInfo = ref<UpdateInfo | null>(null)
@@ -1129,7 +1129,7 @@ async function runUpdateInstall(): Promise<void> {
 
 /**
  * 注册 Rust 后台服务向当前窗口发送的状态事件。
- * @returns 四个事件订阅都完成后的 Promise。
+ * @returns 后台服务和内置插件事件订阅都完成后的 Promise。
  */
 async function registerServiceEvents(): Promise<void> {
   unlistenClipboard = await listen<ClipboardEntry[]>('clipboard-history-updated', (event) => {
@@ -1162,6 +1162,10 @@ async function registerServiceEvents(): Promise<void> {
     message: string
   }>('plugin-development-status', (event) => {
     serviceMessage.value = `${event.payload.pluginName}: ${event.payload.message}`
+  })
+  unlistenOpenSettings = await listen<SettingsSection>('open-settings-section', (event) => {
+    // Rust 已校验分页标识，前端只负责切换现有设置界面。
+    void openSettingsSection(event.payload)
   })
 }
 
@@ -1229,6 +1233,19 @@ function selectMode(mode: 'apps' | 'plugins' | 'clipboard' | 'files'): void {
 function openSettings(): void {
   settingsDraft.value = { ...snapshot.value.settings }
   settingsOpen.value = true
+}
+
+/**
+ * 响应内置设置插件的 feature，打开宿主设置面板中的对应分页。
+ * @param section 要显示的设置分页。
+ * @returns 市场分页完成首次目录加载后结束的 Promise。
+ */
+async function openSettingsSection(section: SettingsSection): Promise<void> {
+  // 打开面板前重新复制已保存值，避免保留上次取消编辑的草稿。
+  settingsDraft.value = { ...snapshot.value.settings }
+  settingsSection.value = section
+  settingsOpen.value = true
+  if (section === 'market') await loadPluginMarket()
 }
 
 /**
@@ -1315,6 +1332,7 @@ onUnmounted(() => {
   unlistenPluginFeatures?.()
   unlistenMarketProgress?.()
   unlistenPluginDevelopment?.()
+  unlistenOpenSettings?.()
   window.removeEventListener('focus', handleWindowFocus)
 })
 </script>
@@ -1774,6 +1792,7 @@ onUnmounted(() => {
               <strong>{{ plugin.title }}</strong>
               <small>
                 {{ plugin.name }} · {{ plugin.version }}
+                <template v-if="plugin.builtIn"> · 内置</template>
                 <template v-if="plugin.development"> · 开发监听中</template>
               </small>
               <small v-for="note in plugin.compatibilityNotes" :key="note">{{ note }}</small>
@@ -1790,6 +1809,7 @@ onUnmounted(() => {
                 >停止监听</button
               >
               <button
+                v-if="!plugin.builtIn"
                 type="button"
                 class="danger-text"
                 :disabled="pluginBusy === plugin.name"
@@ -1797,6 +1817,7 @@ onUnmounted(() => {
                 >卸载</button
               >
               <button
+                v-if="!plugin.builtIn"
                 type="button"
                 class="danger-text"
                 :disabled="pluginBusy === plugin.name"
