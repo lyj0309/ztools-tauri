@@ -1,0 +1,53 @@
+name: Windows Portable
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Existing release tag that receives the portable executable
+        required: true
+        default: v0.1.1
+
+permissions:
+  contents: write
+
+concurrency:
+  group: windows-portable-${{ inputs.release_tag }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 12.4.1
+          run_install: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install frontend dependencies
+        run: pnpm install --frozen-lockfile
+      - name: Build standalone executable
+        run: pnpm tauri build --no-bundle --ci
+      - name: Upload portable executable to release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        run: |
+          $asset = "ZTools_$($env:RELEASE_TAG)_windows_x64_portable.exe"
+          Copy-Item "src-tauri/target/release/ztools-tauri.exe" $asset
+          gh release view $env:RELEASE_TAG 2>$null
+          if ($LASTEXITCODE -ne 0) {
+            gh release create $env:RELEASE_TAG --title "ZTools $env:RELEASE_TAG" --prerelease --generate-notes
+          }
+          gh release upload $env:RELEASE_TAG $asset --clobber
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ZTools-windows-x64-portable
+          path: ZTools_*_windows_x64_portable.exe
+          if-no-files-found: error
