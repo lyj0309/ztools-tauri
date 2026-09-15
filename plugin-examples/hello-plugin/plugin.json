@@ -1,0 +1,15 @@
+{
+  "name": "hello-plugin",
+  "title": "Hello Plugin",
+  "description": "ZTools Tauri 无 Node 插件示例",
+  "version": "1.0.0",
+  "main": "index.html",
+  "features": [
+    {
+      "code": "hello",
+      "explain": "显示启动参数并复制文本",
+      "cmds": ["hello", "你好"]
+    }
+  ]
+}
+

@@ -1,0 +1,1968 @@
+<script setup lang="ts">
+import { getCurrentWebviewWindow } from '@tauri-apps/api/webviewWindow'
+import { listen, type UnlistenFn } from '@tauri-apps/api/event'
+import { pinyin } from 'pinyin-pro'
+import { computed, nextTick, onMounted, onUnmounted, ref } from 'vue'
+import {
+  addLocalShortcut,
+  bootstrapLauncher,
+  cancelPluginMarketInstall,
+  captureClipboard,
+  captureScreen,
+  checkForUpdates,
+  clearClipboardHistory,
+  clearLaunchHistory,
+  copyClipboardText,
+  createBackup,
+  deleteLocalShortcut,
+  deleteClipboardEntry,
+  detectLegacyData,
+  fetchPluginMarket,
+  hideMainWindow,
+  importLegacyData,
+  installPluginDirectory,
+  installPluginFromMarket,
+  installUpdate,
+  launchPluginFeature,
+  listPlugins,
+  launchApplication,
+  openDroppedPath,
+  openExternalUrl,
+  refreshApplications,
+  registerPluginDevelopment,
+  revealDroppedPath,
+  restoreBackup,
+  runSystemCommand,
+  sendTestNotification,
+  setApplicationPinned,
+  syncNow,
+  stopPluginDevelopment,
+  updateLocalShortcutAlias,
+  updateLauncherSettings,
+  uninstallPlugin
+} from './api'
+import type {
+  AppEntry,
+  ClipboardEntry,
+  LauncherSettings,
+  LauncherSnapshot,
+  LegacyImportReport,
+  InstalledPlugin,
+  MarketPlugin,
+  MarketInstallProgress,
+  SyncStatus,
+  UpdateInfo
+} from './types'
+
+const searchInput = ref<HTMLInputElement | null>(null)
+const query = ref('')
+const selectedIndex = ref(0)
+const loading = ref(true)
+const refreshing = ref(false)
+const launchingId = ref<string | null>(null)
+const errorMessage = ref('')
+const settingsOpen = ref(false)
+const settingsSection = ref<'general' | 'appearance' | 'data' | 'plugins' | 'market' | 'services'>(
+  'general'
+)
+const activeMode = ref<'apps' | 'plugins' | 'clipboard' | 'files'>('apps')
+const droppedPaths = ref<string[]>([])
+const dragActive = ref(false)
+let unlistenDragDrop: (() => void) | undefined
+let unlistenClipboard: UnlistenFn | undefined
+let unlistenSync: UnlistenFn | undefined
+let unlistenApplications: UnlistenFn | undefined
+let unlistenPluginFeatures: UnlistenFn | undefined
+let unlistenMarketProgress: UnlistenFn | undefined
+let unlistenPluginDevelopment: UnlistenFn | undefined
+const serviceBusy = ref('')
+const serviceMessage = ref('')
+const updateInfo = ref<UpdateInfo | null>(null)
+const localAliases = ref<Record<string, string>>({})
+const legacyPath = ref('')
+const legacyReport = ref<LegacyImportReport | null>(null)
+const plugins = ref<InstalledPlugin[]>([])
+const pluginInstallPath = ref('')
+const pluginBusy = ref('')
+const marketPlugins = ref<MarketPlugin[]>([])
+const marketQuery = ref('')
+const marketLoading = ref(false)
+const marketCategory = ref('全部')
+const marketProgress = ref<Record<string, MarketInstallProgress>>({})
+const snapshot = ref<LauncherSnapshot>({
+  apps: [],
+  history: [],
+  clipboard: [],
+  pinnedIds: [],
+  settings: {
+    shortcut: 'Alt+Z',
+    autostart: false,
+    hideOnBlur: false,
+    maxResults: 12,
+    theme: 'system',
+    accentColor: '#7c6cf2',
+    showRecent: true,
+    clipboardMonitoring: true,
+    autoPaste: false,
+    clipboardRetentionDays: 180,
+    syncEnabled: false,
+    syncDirectory: '',
+    syncIntervalMinutes: 30,
+    autoCheckUpdates: true,
+    updateFeedUrl: 'https://github.com/lyj0309/ztools-tauri/releases/latest/download/latest.json',
+    updatePublicKey: 'dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEFFRDdCN0VDNUUyMDcwMTUKUldRVmNDQmU3TGZYcmxYSEF3cmNaTkp4MlltZEd2Y2V6VmhrSFJFNjBRMGVLNEcwMzRxSThGeVcK'
+  },
+  localShortcuts: [],
+  syncStatus: { state: 'disabled', message: '同步未启用', lastSyncedAt: null }
+})
+const settingsDraft = ref<LauncherSettings>({ ...snapshot.value.settings })
+
+const pinnedSet = computed(() => new Set(snapshot.value.pinnedIds))
+const historyRank = computed(
+  () => new Map(snapshot.value.history.map((entry, index) => [entry.appId, index]))
+)
+const localPathSet = computed(() => new Set(snapshot.value.localShortcuts.map((item) => item.path)))
+
+const visibleApps = computed(() => {
+  const normalized = query.value.trim().toLocaleLowerCase()
+  return snapshot.value.apps
+    .map((app) => ({ app, score: scoreApplication(app, normalized) }))
+    .filter((candidate) => candidate.score > Number.NEGATIVE_INFINITY)
+    .sort((left, right) => right.score - left.score || left.app.name.localeCompare(right.app.name))
+    .slice(0, snapshot.value.settings.maxResults)
+    .map((candidate) => candidate.app)
+})
+
+type UnifiedLauncherResult =
+  | { kind: 'app'; key: string; app: AppEntry }
+  | { kind: 'plugin'; key: string; plugin: InstalledPlugin; featureCode: string; explain: string }
+  | { kind: 'system'; key: string; commandId: string; title: string; description: string }
+  | { kind: 'url'; key: string; url: string; title: string }
+
+const systemCommands = [
+  {
+    commandId: 'open-home',
+    title: '打开主目录',
+    description: '在文件管理器中打开用户主目录',
+    keywords: 'home 用户 文件夹'
+  },
+  {
+    commandId: 'open-downloads',
+    title: '打开下载目录',
+    description: '在文件管理器中打开系统下载目录',
+    keywords: 'downloads 下载 文件夹'
+  },
+  {
+    commandId: 'open-app-data',
+    title: '打开 ZTools 数据目录',
+    description: '查看 SQLite 数据和本机配置目录',
+    keywords: 'data 数据 sqlite 配置'
+  },
+  {
+    commandId: 'open-plugins',
+    title: '打开插件目录',
+    description: '查看当前安装的插件文件',
+    keywords: 'plugin plugins 插件 扩展'
+  },
+  {
+    commandId: 'open-temp',
+    title: '打开临时目录',
+    description: '在文件管理器中打开系统临时目录',
+    keywords: 'temp tmp 临时 缓存'
+  },
+  {
+    commandId: 'lock-screen',
+    title: '锁定屏幕',
+    description: '立即锁定当前桌面会话',
+    keywords: 'lock screen 锁屏 锁定'
+  }
+] as const
+
+const matchingSystemActions = computed<UnifiedLauncherResult[]>(() => {
+  const normalized = query.value.trim().toLocaleLowerCase()
+  if (!normalized) return []
+  const commands: UnifiedLauncherResult[] = systemCommands
+    .filter((command) =>
+      `${command.title} ${command.description} ${command.keywords}`
+        .toLocaleLowerCase()
+        .includes(normalized)
+    )
+    .map((command) => ({
+      kind: 'system',
+      key: `system:${command.commandId}`,
+      commandId: command.commandId,
+      title: command.title,
+      description: command.description
+    }))
+  const url = normalizedUrl(query.value)
+  if (url) {
+    commands.unshift({ kind: 'url', key: `url:${url}`, url, title: `打开 ${url}` })
+  }
+  return commands
+})
+
+const matchingPluginActions = computed<UnifiedLauncherResult[]>(() => {
+  const rawQuery = query.value.trim()
+  if (!rawQuery) return []
+  const normalized = rawQuery.toLocaleLowerCase()
+  return plugins.value.flatMap((plugin) => {
+    const matchingFeatures = plugin.features.filter((feature) =>
+      feature.cmds.some((command) => commandMatchesQuery(command, rawQuery))
+    )
+    const features = matchingFeatures.length
+      ? matchingFeatures
+      : [plugin.name, plugin.title, plugin.description]
+            .join(' ')
+            .toLocaleLowerCase()
+            .includes(normalized)
+        ? plugin.features.slice(0, 1)
+        : []
+    return features.map((feature) => ({
+      kind: 'plugin' as const,
+      key: `plugin:${plugin.name}:${feature.code}`,
+      plugin,
+      featureCode: feature.code,
+      explain: feature.explain || plugin.description || plugin.name
+    }))
+  })
+})
+
+const visibleLauncherResults = computed<UnifiedLauncherResult[]>(() =>
+  [
+    ...matchingSystemActions.value,
+    ...matchingPluginActions.value,
+    ...visibleApps.value.map((app) => ({ kind: 'app' as const, key: `app:${app.id}`, app }))
+  ].slice(0, snapshot.value.settings.maxResults)
+)
+
+/**
+ * 把明确的 HTTP 地址或域名查询转换为可安全打开的 URL。
+ * @param value 用户搜索框中的原始文本。
+ * @returns 可打开的 HTTP URL；普通搜索词返回 null。
+ */
+function normalizedUrl(value: string): string | null {
+  const raw = value.trim()
+  if (!raw || /\s/.test(raw)) return null
+  const candidate = /^https?:\/\//i.test(raw)
+    ? raw
+    : /^[a-z0-9](?:[a-z0-9-]*\.)+[a-z]{2,}(?:[/:?#].*)?$/i.test(raw)
+      ? `https://${raw}`
+      : ''
+  if (!candidate) return null
+  try {
+    const parsed = new URL(candidate)
+    return ['http:', 'https:'].includes(parsed.protocol) ? parsed.toString() : null
+  } catch {
+    return null
+  }
+}
+
+const visibleClipboard = computed(() => {
+  const normalized = query.value.trim().toLocaleLowerCase()
+  return snapshot.value.clipboard.filter(
+    (entry) => !normalized || entry.content.toLocaleLowerCase().includes(normalized)
+  )
+})
+
+const visibleDroppedPaths = computed(() => {
+  const normalized = query.value.trim().toLocaleLowerCase()
+  return droppedPaths.value.filter(
+    (path) => !normalized || path.toLocaleLowerCase().includes(normalized)
+  )
+})
+
+const visiblePlugins = computed(() => {
+  const rawQuery = query.value.trim()
+  const normalized = rawQuery.toLocaleLowerCase()
+  return plugins.value.filter((plugin) => {
+    if (!normalized) return true
+    const metadataMatches = [plugin.name, plugin.title, plugin.description]
+      .join(' ')
+      .toLocaleLowerCase()
+      .includes(normalized)
+    return (
+      metadataMatches ||
+      plugin.features.some((feature) =>
+        feature.cmds.some((command) => commandMatchesQuery(command, rawQuery))
+      )
+    )
+  })
+})
+
+const filePluginActions = computed(() =>
+  plugins.value.flatMap((plugin) => {
+    const feature = plugin.features.find((candidate) =>
+      candidate.cmds.some((command) => fileCommandMatches(command, droppedPaths.value))
+    )
+    return feature ? [{ plugin, featureCode: feature.code }] : []
+  })
+)
+
+const installedPluginVersions = computed(
+  () => new Map(plugins.value.map((plugin) => [plugin.name, plugin.version]))
+)
+
+const visibleMarketPlugins = computed(() => {
+  const normalized = marketQuery.value.trim().toLocaleLowerCase()
+  return marketPlugins.value
+    .filter((plugin) => {
+      if (marketCategory.value !== '全部' && plugin.categoryTitle !== marketCategory.value) {
+        return false
+      }
+      return (
+        !normalized ||
+        [plugin.name, plugin.title, plugin.description, plugin.author, plugin.categoryTitle]
+          .join(' ')
+          .toLocaleLowerCase()
+          .includes(normalized)
+      )
+    })
+    .slice(0, 80)
+})
+
+const marketCategories = computed(() => [
+  '全部',
+  ...new Set(marketPlugins.value.map((plugin) => plugin.categoryTitle).filter(Boolean))
+])
+
+/**
+ * 判断插件命令声明是否接受当前查询，支持文本命令和市场 manifest 的正则命令。
+ * @param command feature.cmds 中的单条命令声明。
+ * @param rawQuery 用户尚未标准化的查询文本。
+ * @returns 命令是否匹配查询。
+ */
+function commandMatchesQuery(command: unknown, rawQuery: string): boolean {
+  if (typeof command === 'string') {
+    return command.toLocaleLowerCase().includes(rawQuery.toLocaleLowerCase())
+  }
+  if (!command || typeof command !== 'object') return false
+  const candidate = command as Record<string, unknown>
+  if (candidate.type !== 'regex' || typeof candidate.match !== 'string') return false
+  if (typeof candidate.minLength === 'number' && rawQuery.length < candidate.minLength) return false
+  if (typeof candidate.maxLength === 'number' && rawQuery.length > candidate.maxLength) return false
+
+  // 市场格式把正则保存成 /pattern/flags，解析失败时仅忽略该条声明。
+  const match = candidate.match.match(/^\/(.*)\/([a-z]*)$/i)
+  if (!match) return false
+  try {
+    return new RegExp(match[1], match[2]).test(rawQuery)
+  } catch {
+    return false
+  }
+}
+
+/**
+ * 判断 files 类型命令是否接受当前拖入路径集合。
+ * @param command feature.cmds 中的命令声明。
+ * @param paths 操作系统拖放事件提供的绝对路径集合。
+ * @returns 文件数量和扩展名是否符合命令约束。
+ */
+function fileCommandMatches(command: unknown, paths: string[]): boolean {
+  if (!command || typeof command !== 'object' || paths.length === 0) return false
+  const candidate = command as Record<string, unknown>
+  const match =
+    candidate.match && typeof candidate.match === 'object'
+      ? (candidate.match as Record<string, unknown>)
+      : candidate
+  if (candidate.type !== 'files' && match.type !== 'files') return false
+  const minimum = typeof candidate.minLength === 'number' ? candidate.minLength : 1
+  const maximum = typeof candidate.maxLength === 'number' ? candidate.maxLength : Number.MAX_SAFE_INTEGER
+  if (paths.length < minimum || paths.length > maximum) return false
+  const extensions = Array.isArray(match.extensions)
+    ? match.extensions.map((value) => String(value).toLocaleLowerCase())
+    : []
+  if (extensions.length === 0) return true
+  return paths.every((path) => extensions.includes(path.split('.').at(-1)?.toLocaleLowerCase() || ''))
+}
+
+/**
+ * 根据当前查询选择插件最合适的 feature，未匹配时回退到首个 feature。
+ * @param plugin 要启动的插件。
+ * @param rawQuery 当前搜索输入。
+ * @returns 要传给 onPluginEnter 的 feature 编码。
+ */
+function pluginFeatureCode(plugin: InstalledPlugin, rawQuery: string): string {
+  return (
+    plugin.features.find((feature) =>
+      feature.cmds.some((command) => commandMatchesQuery(command, rawQuery))
+    )?.code ||
+    plugin.features[0]?.code ||
+    plugin.name
+  )
+}
+
+const searchPlaceholder = computed(() => {
+  if (activeMode.value === 'clipboard') return '搜索剪贴板历史'
+  if (activeMode.value === 'files') return '筛选已拖入文件'
+  if (activeMode.value === 'plugins') return '搜索插件或功能'
+  return '搜索应用'
+})
+
+/**
+ * 计算应用对当前查询的排序得分，并融入收藏和最近使用权重。
+ * @param app 候选应用。
+ * @param normalized 已标准化的小写查询。
+ * @returns 匹配得分；不匹配时返回负无穷。
+ */
+function scoreApplication(app: AppEntry, normalized: string): number {
+  const name = app.name.toLocaleLowerCase()
+  const path = app.path.toLocaleLowerCase()
+  const keywords = app.keywords.join(' ').toLocaleLowerCase()
+  const pinyinFull = pinyin(app.name, { toneType: 'none', type: 'array' })
+    .join('')
+    .toLocaleLowerCase()
+  const pinyinAbbr = pinyin(app.name, { pattern: 'first', toneType: 'none' })
+    .replaceAll(' ', '')
+    .toLocaleLowerCase()
+  let score = 0
+
+  if (normalized) {
+    if (name === normalized) score += 1000
+    else if (name.startsWith(normalized)) score += 600
+    else if (name.includes(normalized)) score += 300
+    else if (keywords.includes(normalized)) score += 160
+    else if (pinyinFull.includes(normalized)) score += 150
+    else if (pinyinAbbr.includes(normalized)) score += 140
+    else if (path.includes(normalized)) score += 80
+    else return Number.NEGATIVE_INFINITY
+  }
+  if (pinnedSet.value.has(app.id)) score += 100
+  const rank = historyRank.value.get(app.id)
+  if (snapshot.value.settings.showRecent && rank !== undefined) score += Math.max(40 - rank, 1)
+  return score
+}
+
+/**
+ * 从 Rust 宿主加载启动器首屏状态。
+ * @returns 加载完成后的 Promise。
+ */
+async function loadLauncher(): Promise<void> {
+  loading.value = true
+  errorMessage.value = ''
+  try {
+    const [launcherSnapshot, installedPlugins] = await Promise.all([
+      bootstrapLauncher(),
+      listPlugins()
+    ])
+    snapshot.value = launcherSnapshot
+    plugins.value = installedPlugins
+    settingsDraft.value = { ...snapshot.value.settings }
+    localAliases.value = Object.fromEntries(
+      snapshot.value.localShortcuts.map((shortcut) => [shortcut.id, shortcut.alias])
+    )
+    if (snapshot.value.settings.autoCheckUpdates) void checkUpdates(false)
+    void detectLegacyData().then((paths) => {
+      if (!legacyPath.value && paths[0]) legacyPath.value = paths[0]
+    })
+  } catch (error) {
+    errorMessage.value = String(error)
+  } finally {
+    loading.value = false
+    await focusSearch()
+  }
+}
+
+/**
+ * 重新扫描系统应用，同时保留当前查询。
+ * @returns 刷新完成后的 Promise。
+ */
+async function refresh(): Promise<void> {
+  refreshing.value = true
+  errorMessage.value = ''
+  try {
+    snapshot.value = await refreshApplications()
+    selectedIndex.value = 0
+  } catch (error) {
+    errorMessage.value = String(error)
+  } finally {
+    refreshing.value = false
+  }
+}
+
+/**
+ * 启动目标应用并在界面缓存中更新最近记录。
+ * @param app 要启动的应用。
+ * @returns 启动请求完成后的 Promise。
+ */
+async function launch(app: AppEntry): Promise<void> {
+  launchingId.value = app.id
+  errorMessage.value = ''
+  try {
+    await launchApplication(app.id)
+    const now = Date.now()
+    snapshot.value.history = [
+      { appId: app.id, name: app.name, path: app.path, launchedAt: now },
+      ...snapshot.value.history.filter((entry) => entry.appId !== app.id)
+    ].slice(0, 30)
+    query.value = ''
+  } catch (error) {
+    errorMessage.value = String(error)
+  } finally {
+    launchingId.value = null
+  }
+}
+
+/**
+ * 切换应用收藏状态并使用数据库返回的顺序刷新界面。
+ * @param app 要切换收藏状态的应用。
+ * @returns 收藏操作完成后的 Promise。
+ */
+async function togglePinned(app: AppEntry): Promise<void> {
+  const nextPinned = !pinnedSet.value.has(app.id)
+  errorMessage.value = ''
+  try {
+    snapshot.value.pinnedIds = await setApplicationPinned(app.id, nextPinned)
+  } catch (error) {
+    errorMessage.value = String(error)
+  }
+}
+
+/**
+ * 保存设置并采用宿主返回的最终配置。
+ * @returns 设置保存完成后的 Promise。
+ */
+async function saveSettings(): Promise<void> {
+  errorMessage.value = ''
+  try {
+    const saved = await updateLauncherSettings(settingsDraft.value)
+    snapshot.value.settings = saved
+    settingsOpen.value = false
+    await focusSearch()
+  } catch (error) {
+    errorMessage.value = String(error)
+  }
+}
+
+/**
+ * 清除数据库与当前界面中的最近启动记录。
+ * @returns 清理完成后的 Promise。
+ */
+async function clearHistory(): Promise<void> {
+  errorMessage.value = ''
+  try {
+    await clearLaunchHistory()
+    snapshot.value.history = []
+  } catch (error) {
+    errorMessage.value = String(error)
+  }
+}
+
+/**
+ * 捕获当前剪贴板，系统暂时不可用时保留已有历史。
+ * @returns 捕获操作完成后的 Promise。
+ */
+async function refreshClipboard(): Promise<void> {
+  try {
+    snapshot.value.clipboard = await captureClipboard()
+  } catch {
+    // Wayland 或无图形会话可能暂时没有剪贴板，不能影响启动器唤起。
+  }
+}
+
+/**
+ * 复制历史文本并隐藏启动器，让用户返回原应用粘贴。
+ * @param content 要复制的剪贴板文本。
+ * @returns 复制完成后的 Promise。
+ */
+async function copyClipboard(content: string): Promise<void> {
+  errorMessage.value = ''
+  try {
+    await copyClipboardText(content)
+    await hideMainWindow()
+  } catch (error) {
+    errorMessage.value = String(error)
+  }
+}
+
+/**
+ * 删除指定剪贴板历史记录。
+ * @param id 数据库记录标识。
+ * @returns 删除完成后的 Promise。
+ */
+async function removeClipboard(id: number): Promise<void> {
+  errorMessage.value = ''
+  try {
+    snapshot.value.clipboard = await deleteClipboardEntry(id)
+  } catch (error) {
+    errorMessage.value = String(error)
+  }
+}
+
+/**
+ * 清空全部剪贴板历史和当前界面缓存。
+ * @returns 清理完成后的 Promise。
+ */
+async function clearClipboard(): Promise<void> {
+  errorMessage.value = ''
+  try {
+    await clearClipboardHistory()
+    snapshot.value.clipboard = []
+  } catch (error) {
+    errorMessage.value = String(error)
+  }
+}
+
+/**
+ * 从设置页填写的目录安装插件，并采用宿主返回的最终插件列表。
+ * @returns 安装和列表刷新完成后的 Promise。
+ */
+async function installLocalPlugin(): Promise<void> {
+  pluginBusy.value = 'install'
+  serviceMessage.value = ''
+  try {
+    plugins.value = await installPluginDirectory(pluginInstallPath.value.trim())
+    pluginInstallPath.value = ''
+    serviceMessage.value = '插件已安装；可在主窗口的插件页运行'
+  } catch (error) {
+    serviceMessage.value = String(error)
+  } finally {
+    pluginBusy.value = ''
+  }
+}
+
+/**
+ * 注册设置页中的本地目录作为开发插件并启动热重载监听。
+ * @returns 初次同步和监听注册完成后的 Promise。
+ */
+async function registerDevelopmentPlugin(): Promise<void> {
+  pluginBusy.value = 'development'
+  serviceMessage.value = ''
+  try {
+    plugins.value = await registerPluginDevelopment(pluginInstallPath.value.trim())
+    pluginInstallPath.value = ''
+    serviceMessage.value = '开发目录已注册；页面文件变化会自动同步并刷新活动插件'
+  } catch (error) {
+    serviceMessage.value = String(error)
+  } finally {
+    pluginBusy.value = ''
+  }
+}
+
+/**
+ * 停止指定插件的开发目录监听并刷新插件状态。
+ * @param pluginName 插件稳定名称。
+ * @returns 停止监听完成后的 Promise。
+ */
+async function stopDevelopmentPlugin(pluginName: string): Promise<void> {
+  pluginBusy.value = `development:${pluginName}`
+  serviceMessage.value = ''
+  try {
+    plugins.value = await stopPluginDevelopment(pluginName)
+    serviceMessage.value = `${pluginName} 已停止开发监听`
+  } catch (error) {
+    serviceMessage.value = String(error)
+  } finally {
+    pluginBusy.value = ''
+  }
+}
+
+/**
+ * 从 Rust 宿主加载官方市场目录，重复打开时复用当前结果。
+ * @returns 市场目录加载完成后的 Promise。
+ */
+async function loadPluginMarket(): Promise<void> {
+  settingsSection.value = 'market'
+  if (marketPlugins.value.length || marketLoading.value) return
+  marketLoading.value = true
+  serviceMessage.value = ''
+  try {
+    marketPlugins.value = await fetchPluginMarket()
+  } catch (error) {
+    serviceMessage.value = String(error)
+  } finally {
+    marketLoading.value = false
+  }
+}
+
+/**
+ * 下载并安装市场插件，再使用宿主返回值刷新已安装状态。
+ * @param pluginName 市场插件名称。
+ * @returns 下载、校验和原子安装完成后的 Promise。
+ */
+async function installMarketPlugin(pluginName: string): Promise<void> {
+  pluginBusy.value = `market:${pluginName}`
+  serviceMessage.value = ''
+  try {
+    plugins.value = await installPluginFromMarket(pluginName)
+    serviceMessage.value = `${pluginName} 已安装`
+  } catch (error) {
+    serviceMessage.value = String(error)
+  } finally {
+    pluginBusy.value = ''
+  }
+}
+
+/**
+ * 请求 Rust 下载循环取消当前市场安装。
+ * @param pluginName 正在安装的插件名称。
+ * @returns 取消请求完成后的 Promise。
+ */
+async function cancelMarketInstall(pluginName: string): Promise<void> {
+  try {
+    const cancelled = await cancelPluginMarketInstall(pluginName)
+    serviceMessage.value = cancelled ? `${pluginName} 正在取消…` : `${pluginName} 当前没有安装任务`
+  } catch (error) {
+    serviceMessage.value = String(error)
+  }
+}
+
+/**
+ * 将安装阶段和字节数转换成市场按钮旁的短状态。
+ * @param pluginName 市场插件名称。
+ * @returns 当前安装阶段和下载百分比。
+ */
+function marketProgressLabel(pluginName: string): string {
+  const progress = marketProgress.value[pluginName]
+  if (!progress) return '处理中…'
+  if (progress.phase === 'resolving') return '解析地址…'
+  if (progress.phase === 'verifying') return '校验中…'
+  if (progress.phase === 'installing') return '安装中…'
+  if (progress.phase === 'completed') return '已完成'
+  if (!progress.totalBytes) return `${formatPluginSize(progress.receivedBytes)}…`
+  return `${Math.min(Math.round((progress.receivedBytes / progress.totalBytes) * 100), 100)}%`
+}
+
+/**
+ * 使用宿主校验后的系统浏览器打开插件主页。
+ * @param homepage 市场返回的 HTTPS 项目主页。
+ * @returns 打开请求完成后的 Promise。
+ */
+async function openPluginHomepage(homepage: string): Promise<void> {
+  if (!homepage) return
+  try {
+    await openExternalUrl(homepage)
+  } catch (error) {
+    serviceMessage.value = String(error)
+  }
+}
+
+/**
+ * 根据本地版本返回市场操作文字。
+ * @param plugin 市场插件元数据。
+ * @returns 安装、升级或已安装状态文字。
+ */
+function marketActionLabel(plugin: MarketPlugin): string {
+  const installedVersion = installedPluginVersions.value.get(plugin.name)
+  if (!installedVersion) return '安装'
+  if (installedVersion === plugin.version) return '已安装'
+  return `升级 ${plugin.version}`
+}
+
+/**
+ * 把市场字节数格式化为紧凑的人类可读文本。
+ * @param bytes 插件包标称字节数。
+ * @returns KB 或 MB 文本。
+ */
+function formatPluginSize(bytes: number): string {
+  if (bytes >= 1024 * 1024) return `${(bytes / 1024 / 1024).toFixed(1)} MB`
+  return `${Math.max(bytes / 1024, 0).toFixed(0)} KB`
+}
+
+/**
+ * 启动插件的首个功能，并把当前查询作为文本进入动作。
+ * @param plugin 要启动的插件。
+ * @returns 插件窗口显示完成后的 Promise。
+ */
+async function runPlugin(plugin: InstalledPlugin): Promise<void> {
+  pluginBusy.value = plugin.name
+  errorMessage.value = ''
+  try {
+    const featureCode = pluginFeatureCode(plugin, query.value.trim())
+    await launchPluginFeature(plugin.name, featureCode, query.value || null)
+  } catch (error) {
+    errorMessage.value = String(error)
+  } finally {
+    pluginBusy.value = ''
+  }
+}
+
+/**
+ * 启动统一搜索结果中的系统应用或精确插件 feature。
+ * @param result 统一结果模型。
+ * @returns 启动请求完成后的 Promise。
+ */
+async function launchUnifiedResult(result: UnifiedLauncherResult): Promise<void> {
+  if (result.kind === 'app') {
+    await launch(result.app)
+    return
+  }
+  if (result.kind === 'system') {
+    try {
+      await runSystemCommand(result.commandId)
+      await hideMainWindow()
+    } catch (error) {
+      errorMessage.value = String(error)
+    }
+    return
+  }
+  if (result.kind === 'url') {
+    try {
+      await openExternalUrl(result.url)
+      await hideMainWindow()
+    } catch (error) {
+      errorMessage.value = String(error)
+    }
+    return
+  }
+  pluginBusy.value = result.plugin.name
+  errorMessage.value = ''
+  try {
+    await launchPluginFeature(result.plugin.name, result.featureCode, query.value.trim())
+  } catch (error) {
+    errorMessage.value = String(error)
+  } finally {
+    pluginBusy.value = ''
+  }
+}
+
+/**
+ * 使用当前拖入路径启动 files 类型插件 feature，并由 Rust 授予本窗口临时路径权限。
+ * @param plugin 要启动的插件。
+ * @param featureCode files 类型 feature 编码。
+ * @returns 插件窗口显示完成后的 Promise。
+ */
+async function runPluginWithFiles(plugin: InstalledPlugin, featureCode: string): Promise<void> {
+  pluginBusy.value = plugin.name
+  errorMessage.value = ''
+  try {
+    await launchPluginFeature(plugin.name, featureCode, [...droppedPaths.value])
+  } catch (error) {
+    errorMessage.value = String(error)
+  } finally {
+    pluginBusy.value = ''
+  }
+}
+
+/**
+ * 关闭活动窗口并卸载指定插件。
+ * @param pluginName 要卸载的 manifest 名称。
+ * @param removeData 是否同时清除插件私有数据。
+ * @returns 卸载和列表刷新完成后的 Promise。
+ */
+async function removePlugin(pluginName: string, removeData = false): Promise<void> {
+  pluginBusy.value = pluginName
+  serviceMessage.value = ''
+  try {
+    plugins.value = await uninstallPlugin(pluginName, removeData)
+    serviceMessage.value = removeData ? '插件及其私有数据已删除' : '插件已卸载，私有数据已保留'
+  } catch (error) {
+    serviceMessage.value = String(error)
+  } finally {
+    pluginBusy.value = ''
+  }
+}
+
+/**
+ * 在用户二次确认后卸载插件并永久清除它的私有数据。
+ * @param pluginName 要卸载的 manifest 名称。
+ * @returns 用户取消时直接结束，否则等待卸载完成。
+ */
+async function removePluginWithData(pluginName: string): Promise<void> {
+  if (!window.confirm(`确定卸载 ${pluginName} 并永久删除它的全部私有数据吗？`)) return
+  await removePlugin(pluginName, true)
+}
+
+/**
+ * 使用系统默认程序打开拖入的文件或目录。
+ * @param path 要打开的绝对路径。
+ * @returns 打开完成后的 Promise。
+ */
+async function openFile(path: string): Promise<void> {
+  errorMessage.value = ''
+  try {
+    await openDroppedPath(path)
+    await hideMainWindow()
+  } catch (error) {
+    errorMessage.value = String(error)
+  }
+}
+
+/**
+ * 在系统文件管理器中定位拖入的路径。
+ * @param path 要定位的绝对路径。
+ * @returns 定位完成后的 Promise。
+ */
+async function revealFile(path: string): Promise<void> {
+  errorMessage.value = ''
+  try {
+    await revealDroppedPath(path)
+  } catch (error) {
+    errorMessage.value = String(error)
+  }
+}
+
+/**
+ * 将拖入路径保存为长期本地启动项。
+ * @param path 要保存的绝对路径。
+ * @returns 保存完成后的 Promise。
+ */
+async function pinDroppedPath(path: string): Promise<void> {
+  errorMessage.value = ''
+  try {
+    snapshot.value = await addLocalShortcut(path)
+    serviceMessage.value = '已加入本地启动项'
+  } catch (error) {
+    errorMessage.value = String(error)
+  }
+}
+
+/**
+ * 保存本地启动项别名并刷新应用搜索数据。
+ * @param id 本地启动项标识。
+ * @returns 保存完成后的 Promise。
+ */
+async function saveLocalAlias(id: string): Promise<void> {
+  try {
+    snapshot.value = await updateLocalShortcutAlias(id, localAliases.value[id] || '')
+    serviceMessage.value = '别名已保存'
+  } catch (error) {
+    errorMessage.value = String(error)
+  }
+}
+
+/**
+ * 删除本地启动项并刷新应用搜索数据。
+ * @param id 本地启动项标识。
+ * @returns 删除完成后的 Promise。
+ */
+async function removeLocalShortcut(id: string): Promise<void> {
+  try {
+    snapshot.value = await deleteLocalShortcut(id)
+    delete localAliases.value[id]
+  } catch (error) {
+    errorMessage.value = String(error)
+  }
+}
+
+/**
+ * 从 Electron 版 LMDB 只读导入仍属于宿主的数据。
+ * @returns 导入和界面刷新完成后的 Promise。
+ */
+async function runLegacyImport(): Promise<void> {
+  serviceBusy.value = 'legacy'
+  serviceMessage.value = ''
+  try {
+    legacyReport.value = await importLegacyData(legacyPath.value)
+    snapshot.value = await bootstrapLauncher()
+    settingsDraft.value = { ...snapshot.value.settings }
+    localAliases.value = Object.fromEntries(
+      snapshot.value.localShortcuts.map((shortcut) => [shortcut.id, shortcut.alias])
+    )
+    serviceMessage.value = '旧数据导入完成，原目录未改动'
+  } catch (error) {
+    serviceMessage.value = String(error)
+  } finally {
+    serviceBusy.value = ''
+  }
+}
+
+/**
+ * 让用户选择目标文件并创建包含数据库与插件的完整备份。
+ * @returns 备份流程结束后的 Promise。
+ */
+async function runCreateBackup(): Promise<void> {
+  serviceBusy.value = 'backup'
+  serviceMessage.value = ''
+  try {
+    const report = await createBackup()
+    if (report) {
+      serviceMessage.value = `备份完成：${report.pluginCount} 个插件，${formatPluginSize(report.totalBytes)}`
+    }
+  } catch (error) {
+    serviceMessage.value = String(error)
+  } finally {
+    serviceBusy.value = ''
+  }
+}
+
+/**
+ * 让用户选择备份文件，恢复后重新加载启动器与插件状态。
+ * @returns 恢复流程结束后的 Promise。
+ */
+async function runRestoreBackup(): Promise<void> {
+  serviceBusy.value = 'restore'
+  serviceMessage.value = ''
+  try {
+    const report = await restoreBackup()
+    if (report) {
+      snapshot.value = await bootstrapLauncher()
+      settingsDraft.value = { ...snapshot.value.settings }
+      plugins.value = await listPlugins()
+      localAliases.value = Object.fromEntries(
+        snapshot.value.localShortcuts.map((shortcut) => [shortcut.id, shortcut.alias])
+      )
+      serviceMessage.value = `恢复完成：${report.pluginCount} 个插件，${report.pluginFileCount} 个文件`
+    }
+  } catch (error) {
+    serviceMessage.value = String(error)
+  } finally {
+    serviceBusy.value = ''
+  }
+}
+
+/**
+ * 执行共享目录同步并把状态显示在设置页。
+ * @returns 同步完成后的 Promise。
+ */
+async function runSync(): Promise<void> {
+  serviceBusy.value = 'sync'
+  serviceMessage.value = ''
+  try {
+    snapshot.value.syncStatus = await syncNow()
+    snapshot.value = await bootstrapLauncher()
+    serviceMessage.value = '同步完成'
+  } catch (error) {
+    snapshot.value.syncStatus = { state: 'error', message: String(error), lastSyncedAt: null }
+    serviceMessage.value = String(error)
+  } finally {
+    serviceBusy.value = ''
+  }
+}
+
+/**
+ * 先保存服务设置，再立即执行一次同步。
+ * @returns 保存和同步均完成后的 Promise。
+ */
+async function saveAndSync(): Promise<void> {
+  try {
+    snapshot.value.settings = await updateLauncherSettings(settingsDraft.value)
+    await runSync()
+  } catch (error) {
+    serviceMessage.value = String(error)
+  }
+}
+
+/**
+ * 先保存更新源，再检查最新版本。
+ * @returns 保存和检查均完成后的 Promise。
+ */
+async function saveAndCheckUpdates(): Promise<void> {
+  try {
+    snapshot.value.settings = await updateLauncherSettings(settingsDraft.value)
+    await checkUpdates(true)
+  } catch (error) {
+    serviceMessage.value = String(error)
+  }
+}
+
+/**
+ * 检查远端发布源并选择是否展示失败信息。
+ * @param showErrors 是否把错误显示到设置页。
+ * @returns 检查完成后的 Promise。
+ */
+async function checkUpdates(showErrors = true): Promise<void> {
+  serviceBusy.value = 'update'
+  if (showErrors) serviceMessage.value = ''
+  try {
+    updateInfo.value = await checkForUpdates()
+    if (showErrors) {
+      serviceMessage.value = updateInfo.value.updateAvailable ? '发现新版本' : '当前已是最新版本'
+    }
+  } catch (error) {
+    if (showErrors) serviceMessage.value = String(error)
+  } finally {
+    serviceBusy.value = ''
+  }
+}
+
+/**
+ * 请求通知权限并发送宿主测试通知。
+ * @returns 通知测试完成后的 Promise。
+ */
+async function testNotification(): Promise<void> {
+  serviceBusy.value = 'notification'
+  serviceMessage.value = ''
+  try {
+    await sendTestNotification()
+    serviceMessage.value = '测试通知已发送'
+  } catch (error) {
+    serviceMessage.value = String(error)
+  } finally {
+    serviceBusy.value = ''
+  }
+}
+
+/**
+ * 调用 Rust 屏幕捕获并展示保存位置。
+ * @returns 截图请求完成后的 Promise。
+ */
+async function runScreenCapture(): Promise<void> {
+  serviceBusy.value = 'screenshot'
+  serviceMessage.value = ''
+  try {
+    const path = await captureScreen()
+    serviceMessage.value = `截图已保存：${path}`
+  } catch (error) {
+    serviceMessage.value = String(error)
+  } finally {
+    serviceBusy.value = ''
+  }
+}
+
+/**
+ * 在系统浏览器打开已校验的更新发布页。
+ * @returns 浏览器启动完成后的 Promise。
+ */
+async function openUpdatePage(): Promise<void> {
+  if (!updateInfo.value?.releaseUrl) return
+  try {
+    await openExternalUrl(updateInfo.value.releaseUrl)
+  } catch (error) {
+    serviceMessage.value = String(error)
+  }
+}
+
+/**
+ * 下载并安装已由 Tauri 公钥验证的更新。
+ * @returns 安装或失败反馈完成后的 Promise。
+ */
+async function runUpdateInstall(): Promise<void> {
+  serviceBusy.value = 'install-update'
+  serviceMessage.value = '正在下载并验证更新…'
+  try {
+    await installUpdate()
+  } catch (error) {
+    serviceMessage.value = String(error)
+    serviceBusy.value = ''
+  }
+}
+
+/**
+ * 注册 Rust 后台服务向当前窗口发送的状态事件。
+ * @returns 四个事件订阅都完成后的 Promise。
+ */
+async function registerServiceEvents(): Promise<void> {
+  unlistenClipboard = await listen<ClipboardEntry[]>('clipboard-history-updated', (event) => {
+    snapshot.value.clipboard = event.payload
+  })
+  unlistenSync = await listen<SyncStatus>('sync-status-updated', (event) => {
+    snapshot.value.syncStatus = event.payload
+  })
+  unlistenApplications = await listen<AppEntry[]>('applications-updated', (event) => {
+    // 后台事件只携带系统应用，本地启动项继续使用当前快照中的记录。
+    const localApps = snapshot.value.apps.filter((app) => app.source.startsWith('local-'))
+    snapshot.value.apps = [...event.payload, ...localApps]
+  })
+  unlistenPluginFeatures = await listen<string>('plugin-features-changed', async () => {
+    // 动态 feature 已在 Rust 持久化，重新读取合并结果以刷新搜索索引。
+    plugins.value = await listPlugins()
+  })
+  unlistenMarketProgress = await listen<MarketInstallProgress>(
+    'plugin-market-install-progress',
+    (event) => {
+      marketProgress.value = {
+        ...marketProgress.value,
+        [event.payload.pluginName]: event.payload
+      }
+    }
+  )
+  unlistenPluginDevelopment = await listen<{
+    pluginName: string
+    state: 'reloaded' | 'error'
+    message: string
+  }>('plugin-development-status', (event) => {
+    serviceMessage.value = `${event.payload.pluginName}: ${event.payload.message}`
+  })
+}
+
+/**
+ * 根据键盘输入移动选择、启动应用或关闭窗口。
+ * @param event 搜索框键盘事件。
+ * @returns 无返回值。
+ */
+function handleKeyboard(event: KeyboardEvent): void {
+  const resultCount =
+    activeMode.value === 'apps'
+      ? visibleLauncherResults.value.length
+      : activeMode.value === 'plugins'
+        ? visiblePlugins.value.length
+      : activeMode.value === 'clipboard'
+        ? visibleClipboard.value.length
+        : filePluginActions.value.length + visibleDroppedPaths.value.length
+  if (event.key === 'ArrowDown') {
+    event.preventDefault()
+    selectedIndex.value = Math.min(selectedIndex.value + 1, Math.max(resultCount - 1, 0))
+  } else if (event.key === 'ArrowUp') {
+    event.preventDefault()
+    selectedIndex.value = Math.max(selectedIndex.value - 1, 0)
+  } else if (event.key === 'Enter') {
+    if (activeMode.value === 'apps') {
+      const result = visibleLauncherResults.value[selectedIndex.value]
+      if (result) void launchUnifiedResult(result)
+    } else if (activeMode.value === 'plugins') {
+      const plugin = visiblePlugins.value[selectedIndex.value]
+      if (plugin) void runPlugin(plugin)
+    } else if (activeMode.value === 'clipboard') {
+      const entry = visibleClipboard.value[selectedIndex.value]
+      if (entry) void copyClipboard(entry.content)
+    } else {
+      const action = filePluginActions.value[selectedIndex.value]
+      if (action) void runPluginWithFiles(action.plugin, action.featureCode)
+      else {
+        const path = visibleDroppedPaths.value[selectedIndex.value - filePluginActions.value.length]
+        if (path) void openFile(path)
+      }
+    }
+  } else if (event.key === 'Escape') {
+    if (settingsOpen.value) settingsOpen.value = false
+    else void hideMainWindow()
+  }
+}
+
+/**
+ * 切换结果类别并重置查询与键盘位置。
+ * @param mode 要显示的结果类别。
+ * @returns 无返回值。
+ */
+function selectMode(mode: 'apps' | 'plugins' | 'clipboard' | 'files'): void {
+  activeMode.value = mode
+  query.value = ''
+  selectedIndex.value = 0
+  if (mode === 'clipboard') void refreshClipboard()
+  void focusSearch()
+}
+
+/**
+ * 打开设置面板并复制当前已保存配置作为草稿。
+ * @returns 无返回值。
+ */
+function openSettings(): void {
+  settingsDraft.value = { ...snapshot.value.settings }
+  settingsOpen.value = true
+}
+
+/**
+ * 重置查询和键盘选择位置。
+ * @returns 无返回值。
+ */
+function clearQuery(): void {
+  query.value = ''
+  selectedIndex.value = 0
+  void focusSearch()
+}
+
+/**
+ * 等待 DOM 更新后聚焦并选中搜索框内容。
+ * @returns 聚焦完成后的 Promise。
+ */
+async function focusSearch(): Promise<void> {
+  await nextTick()
+  searchInput.value?.focus()
+  searchInput.value?.select()
+}
+
+/**
+ * 从路径提取简短来源文字，避免结果行被完整路径挤占。
+ * @param app 当前应用记录。
+ * @returns 用于副标题的目录或来源。
+ */
+function appSubtitle(app: AppEntry): string {
+  const separators = /[/\\]/
+  const parts = app.path.split(separators)
+  return parts.length > 2 ? parts.slice(-2).join('/') : app.source
+}
+
+/**
+ * 返回文件路径的末级名称作为结果标题。
+ * @param path 文件或目录绝对路径。
+ * @returns 可展示的文件名。
+ */
+function fileName(path: string): string {
+  return path.split(/[/\\]/).filter(Boolean).at(-1) || path
+}
+
+/**
+ * 响应宿主窗口重新获得焦点并刷新剪贴板。
+ * @returns 无返回值。
+ */
+function handleWindowFocus(): void {
+  void focusSearch()
+  void refreshClipboard()
+}
+
+/**
+ * 注册 Tauri 原生文件拖放事件并保存清理函数。
+ * @returns 注册完成后的 Promise。
+ */
+async function registerDragAndDrop(): Promise<void> {
+  unlistenDragDrop = await getCurrentWebviewWindow().onDragDropEvent((event) => {
+    if (event.payload.type === 'over') {
+      dragActive.value = true
+    } else if (event.payload.type === 'leave') {
+      dragActive.value = false
+    } else {
+      // 只接受系统事件提供的绝对路径，具体存在性仍由 Rust 二次校验。
+      droppedPaths.value = [...new Set(event.payload.paths)]
+      dragActive.value = false
+      selectMode('files')
+    }
+  })
+}
+
+onMounted(() => {
+  void loadLauncher()
+  void registerDragAndDrop()
+  void registerServiceEvents()
+  window.addEventListener('focus', handleWindowFocus)
+})
+
+onUnmounted(() => {
+  // 页面销毁时释放原生事件订阅与浏览器焦点监听。
+  unlistenDragDrop?.()
+  unlistenClipboard?.()
+  unlistenSync?.()
+  unlistenApplications?.()
+  unlistenPluginFeatures?.()
+  unlistenMarketProgress?.()
+  unlistenPluginDevelopment?.()
+  window.removeEventListener('focus', handleWindowFocus)
+})
+</script>
+
+<template>
+  <main
+    class="launcher-shell"
+    :data-theme="snapshot.settings.theme"
+    :style="{ '--accent-color': snapshot.settings.accentColor }"
+    @keydown="handleKeyboard"
+  >
+    <section class="search-panel">
+      <div class="brand-mark">Z</div>
+      <div class="search-field">
+        <span class="search-icon" aria-hidden="true">⌕</span>
+        <input
+          ref="searchInput"
+          v-model="query"
+          type="text"
+          autocomplete="off"
+          spellcheck="false"
+          :placeholder="searchPlaceholder"
+          :aria-label="searchPlaceholder"
+          @input="selectedIndex = 0"
+        />
+        <button v-if="query" class="icon-button" title="清空搜索" @click="clearQuery">×</button>
+      </div>
+      <button class="toolbar-button" title="重新扫描应用" :disabled="refreshing" @click="refresh">
+        <span :class="{ spinning: refreshing }">↻</span>
+      </button>
+      <button class="toolbar-button" title="设置" @click="openSettings">⚙</button>
+    </section>
+
+    <nav class="mode-tabs" aria-label="结果类别">
+      <button :class="{ active: activeMode === 'apps' }" @click="selectMode('apps')">
+        应用 <span>{{ snapshot.apps.length }}</span>
+      </button>
+      <button :class="{ active: activeMode === 'plugins' }" @click="selectMode('plugins')">
+        插件 <span>{{ plugins.length }}</span>
+      </button>
+      <button :class="{ active: activeMode === 'clipboard' }" @click="selectMode('clipboard')">
+        剪贴板 <span>{{ snapshot.clipboard.length }}</span>
+      </button>
+      <button :class="{ active: activeMode === 'files' }" @click="selectMode('files')">
+        文件 <span>{{ droppedPaths.length }}</span>
+      </button>
+    </nav>
+
+    <p v-if="errorMessage" class="error-banner">{{ errorMessage }}</p>
+
+    <section class="results-panel" aria-live="polite">
+      <div v-if="loading" class="empty-state">
+        <span class="loader"></span>
+        <p>正在读取系统应用…</p>
+      </div>
+      <div v-else-if="activeMode === 'apps' && visibleLauncherResults.length === 0" class="empty-state">
+        <strong>没有找到应用或插件指令</strong>
+        <p>换一个名称、命令或路径关键字试试</p>
+      </div>
+      <template v-else-if="activeMode === 'apps'">
+        <div class="section-caption">
+          <span>{{ query ? `“${query}” 的结果` : '应用' }}</span>
+          <span>{{ visibleLauncherResults.length }} 项</span>
+        </div>
+        <button
+          v-for="(result, index) in visibleLauncherResults"
+          :key="result.key"
+          class="result-row"
+          :class="{ 'plugin-row': result.kind === 'plugin', selected: index === selectedIndex }"
+          @mouseenter="selectedIndex = index"
+          @dblclick="launchUnifiedResult(result)"
+          @click="selectedIndex = index"
+        >
+          <template v-if="result.kind === 'app'">
+            <span class="app-icon">{{ result.app.name.slice(0, 1).toLocaleUpperCase() }}</span>
+            <span class="app-copy">
+              <strong>{{ result.app.name }}</strong>
+              <small>{{ appSubtitle(result.app) }}</small>
+            </span>
+            <span v-if="launchingId === result.app.id" class="row-status">启动中</span>
+            <span
+              v-else-if="snapshot.settings.showRecent && historyRank.has(result.app.id)"
+              class="row-status"
+              >最近使用</span
+            >
+            <span
+              class="pin-button"
+              :class="{ pinned: pinnedSet.has(result.app.id) }"
+              role="button"
+              :aria-label="pinnedSet.has(result.app.id) ? '取消收藏' : '收藏'"
+              @click.stop="togglePinned(result.app)"
+            >
+              ★</span
+            >
+          </template>
+          <template v-else-if="result.kind === 'plugin'">
+            <span class="app-icon plugin-icon">{{
+              result.plugin.title.slice(0, 1).toLocaleUpperCase()
+            }}</span>
+            <span class="app-copy">
+              <strong>{{ result.plugin.title }}</strong>
+              <small>{{ result.explain }} · {{ result.featureCode }}</small>
+            </span>
+            <span class="row-status">插件指令</span>
+          </template>
+          <template v-else>
+            <span class="app-icon">{{ result.kind === 'url' ? '↗' : '⌘' }}</span>
+            <span class="app-copy">
+              <strong>{{ result.title }}</strong>
+              <small>{{ result.kind === 'url' ? result.url : result.description }}</small>
+            </span>
+            <span class="row-status">{{ result.kind === 'url' ? '网址' : '系统指令' }}</span>
+          </template>
+          <kbd v-if="index === selectedIndex">↵</kbd>
+        </button>
+      </template>
+
+      <div v-else-if="activeMode === 'plugins' && visiblePlugins.length === 0" class="empty-state">
+        <strong>还没有可运行插件</strong>
+        <p>在设置的插件页安装包含 plugin.json 的目录</p>
+      </div>
+      <template v-else-if="activeMode === 'plugins'">
+        <div class="section-caption">
+          <span>{{ query ? `“${query}” 的插件` : '插件' }}</span>
+          <span>{{ visiblePlugins.length }} / {{ plugins.length }}</span>
+        </div>
+        <button
+          v-for="(plugin, index) in visiblePlugins"
+          :key="plugin.name"
+          class="result-row plugin-row"
+          :class="{ selected: index === selectedIndex }"
+          @mouseenter="selectedIndex = index"
+          @dblclick="runPlugin(plugin)"
+          @click="selectedIndex = index"
+        >
+          <span class="app-icon plugin-icon">{{ plugin.title.slice(0, 1).toLocaleUpperCase() }}</span>
+          <span class="app-copy">
+            <strong>{{ plugin.title }}</strong>
+            <small>{{ plugin.features[0]?.explain || plugin.description || plugin.name }}</small>
+          </span>
+          <span
+            class="compatibility-badge"
+            :class="{ adapting: plugin.compatibility === 'needs-adaptation' }"
+            >{{ plugin.compatibility === 'native-webview' ? '可直接运行' : '需适配 preload' }}</span
+          >
+          <span v-if="pluginBusy === plugin.name" class="row-status">启动中</span>
+          <kbd v-else-if="index === selectedIndex">↵</kbd>
+        </button>
+      </template>
+
+      <div v-else-if="activeMode === 'clipboard' && visibleClipboard.length === 0" class="empty-state">
+        <strong>没有剪贴板历史</strong>
+        <p>复制文本后重新唤起 ZTools 即可捕获</p>
+      </div>
+      <template v-else-if="activeMode === 'clipboard'">
+        <div class="section-caption">
+          <span>纯文本历史</span>
+          <button class="caption-action" @click="clearClipboard">清空</button>
+        </div>
+        <button
+          v-for="(entry, index) in visibleClipboard"
+          :key="entry.id"
+          class="result-row clipboard-row"
+          :class="{ selected: index === selectedIndex }"
+          @mouseenter="selectedIndex = index"
+          @dblclick="copyClipboard(entry.content)"
+          @click="selectedIndex = index"
+        >
+          <span class="app-icon clipboard-icon">⌘</span>
+          <span class="app-copy">
+            <strong>{{ entry.content }}</strong>
+            <small>{{ new Date(entry.capturedAt).toLocaleString() }}</small>
+          </span>
+          <span></span>
+          <span class="remove-button" role="button" @click.stop="removeClipboard(entry.id)">×</span>
+          <kbd v-if="index === selectedIndex">复制</kbd>
+        </button>
+      </template>
+
+      <div v-else-if="visibleDroppedPaths.length === 0" class="empty-state file-drop-empty">
+        <strong>把文件或目录拖到这里</strong>
+        <p>路径由 Rust 校验后交给系统默认应用打开</p>
+      </div>
+      <template v-else>
+        <template v-if="filePluginActions.length">
+          <div class="section-caption">
+            <span>可处理这些文件的插件</span>
+            <span>{{ filePluginActions.length }}</span>
+          </div>
+          <button
+            v-for="(action, index) in filePluginActions"
+            :key="`${action.plugin.name}:${action.featureCode}`"
+            class="result-row plugin-row"
+            :class="{ selected: index === selectedIndex }"
+            @mouseenter="selectedIndex = index"
+            @dblclick="runPluginWithFiles(action.plugin, action.featureCode)"
+            @click="selectedIndex = index"
+          >
+            <span class="app-icon plugin-icon">{{ action.plugin.title.slice(0, 1) }}</span>
+            <span class="app-copy">
+              <strong>{{ action.plugin.title }}</strong>
+              <small>{{ action.featureCode }} · {{ droppedPaths.length }} 个路径</small>
+            </span>
+            <span v-if="pluginBusy === action.plugin.name" class="row-status">启动中</span>
+            <kbd v-else-if="index === selectedIndex">运行</kbd>
+          </button>
+        </template>
+        <div class="section-caption">
+          <span>已拖入路径</span>
+          <button class="caption-action" @click="droppedPaths = []">清空</button>
+        </div>
+        <button
+          v-for="(path, index) in visibleDroppedPaths"
+          :key="path"
+          class="result-row file-row"
+          :class="{ selected: index + filePluginActions.length === selectedIndex }"
+          @mouseenter="selectedIndex = index + filePluginActions.length"
+          @dblclick="openFile(path)"
+          @click="selectedIndex = index + filePluginActions.length"
+        >
+          <span class="app-icon file-icon">↗</span>
+          <span class="app-copy">
+            <strong>{{ fileName(path) }}</strong>
+            <small>{{ path }}</small>
+          </span>
+          <span
+            class="add-button"
+            :class="{ added: localPathSet.has(path) }"
+            role="button"
+            @click.stop="pinDroppedPath(path)"
+            >{{ localPathSet.has(path) ? '已加入' : '加入' }}</span
+          >
+          <span class="reveal-button" role="button" @click.stop="revealFile(path)">定位</span>
+          <kbd v-if="index + filePluginActions.length === selectedIndex">打开</kbd>
+        </button>
+      </template>
+    </section>
+
+    <footer>
+      <span><kbd>↑</kbd><kbd>↓</kbd> 选择</span>
+      <span><kbd>Enter</kbd> 启动</span>
+      <span><kbd>Esc</kbd> 隐藏</span>
+      <span class="shortcut-label">{{ snapshot.settings.shortcut }}</span>
+    </footer>
+
+    <div v-if="dragActive" class="drop-overlay">
+      <strong>松开以添加文件</strong>
+    </div>
+
+    <div v-if="settingsOpen" class="modal-backdrop" @click.self="settingsOpen = false">
+      <form class="settings-card" @submit.prevent="saveSettings">
+        <header>
+          <div>
+            <h2>ZTools 设置</h2>
+            <p>配置由 Rust 宿主保存并即时应用</p>
+          </div>
+          <button type="button" class="icon-button" @click="settingsOpen = false">×</button>
+        </header>
+
+        <nav class="settings-tabs" aria-label="设置类别">
+          <button
+            type="button"
+            :class="{ active: settingsSection === 'general' }"
+            @click="settingsSection = 'general'"
+            >通用</button
+          >
+          <button
+            type="button"
+            :class="{ active: settingsSection === 'appearance' }"
+            @click="settingsSection = 'appearance'"
+            >外观</button
+          >
+          <button
+            type="button"
+            :class="{ active: settingsSection === 'data' }"
+            @click="settingsSection = 'data'"
+            >数据</button
+          >
+          <button
+            type="button"
+            :class="{ active: settingsSection === 'plugins' }"
+            @click="settingsSection = 'plugins'"
+            >插件</button
+          >
+          <button
+            type="button"
+            :class="{ active: settingsSection === 'market' }"
+            @click="loadPluginMarket"
+            >市场</button
+          >
+          <button
+            type="button"
+            :class="{ active: settingsSection === 'services' }"
+            @click="settingsSection = 'services'"
+            >服务</button
+          >
+        </nav>
+
+        <section v-if="settingsSection === 'general'" class="settings-body">
+          <label class="field-row">
+            <span>全局快捷键</span>
+            <input v-model.trim="settingsDraft.shortcut" placeholder="Alt+Z" />
+          </label>
+          <label class="field-row">
+            <span>最多显示结果</span>
+            <input v-model.number="settingsDraft.maxResults" type="number" min="4" max="50" />
+          </label>
+          <label class="switch-row">
+            <span><strong>开机自动启动</strong><small>在后台等待全局快捷键</small></span>
+            <input v-model="settingsDraft.autostart" type="checkbox" />
+          </label>
+          <label class="switch-row">
+            <span><strong>失去焦点时隐藏</strong><small>切到其他窗口后自动收起</small></span>
+            <input v-model="settingsDraft.hideOnBlur" type="checkbox" />
+          </label>
+        </section>
+
+        <section v-else-if="settingsSection === 'appearance'" class="settings-body">
+          <label class="field-row">
+            <span>主题</span>
+            <select v-model="settingsDraft.theme">
+              <option value="system">跟随系统</option>
+              <option value="light">浅色</option>
+              <option value="dark">深色</option>
+            </select>
+          </label>
+          <label class="field-row">
+            <span>主题色</span>
+            <input v-model="settingsDraft.accentColor" type="color" />
+          </label>
+          <label class="switch-row">
+            <span><strong>使用最近记录排序</strong><small>常用应用排在更靠前的位置</small></span>
+            <input v-model="settingsDraft.showRecent" type="checkbox" />
+          </label>
+        </section>
+
+        <section v-else-if="settingsSection === 'data'" class="settings-body">
+          <label class="switch-row">
+            <span><strong>持续记录剪贴板</strong><small>Rust 后台仅保存纯文本，最多 2 MB</small></span>
+            <input v-model="settingsDraft.clipboardMonitoring" type="checkbox" />
+          </label>
+          <label class="switch-row">
+            <span><strong>选择后自动粘贴</strong><small>隐藏窗口后由 Rust 模拟系统粘贴快捷键</small></span>
+            <input v-model="settingsDraft.autoPaste" type="checkbox" />
+          </label>
+          <label class="field-row">
+            <span>剪贴板保留天数</span>
+            <input
+              v-model.number="settingsDraft.clipboardRetentionDays"
+              type="number"
+              min="1"
+              max="3650"
+            />
+          </label>
+          <div class="settings-subtitle">本地启动项</div>
+          <div v-if="snapshot.localShortcuts.length === 0" class="settings-empty">
+            把文件拖入主窗口后点击“加入”
+          </div>
+          <div
+            v-for="shortcut in snapshot.localShortcuts"
+            :key="shortcut.id"
+            class="shortcut-editor"
+          >
+            <span :title="shortcut.path">{{ shortcut.name }}</span>
+            <input v-model="localAliases[shortcut.id]" placeholder="别名" />
+            <button type="button" @click="saveLocalAlias(shortcut.id)">保存</button>
+            <button type="button" class="danger-text" @click="removeLocalShortcut(shortcut.id)">
+              删除
+            </button>
+          </div>
+          <div class="inline-actions">
+            <button type="button" class="danger-button" @click="clearHistory">清空启动历史</button>
+            <button type="button" class="danger-button" @click="clearClipboard">
+              清空剪贴板
+            </button>
+          </div>
+          <div class="settings-subtitle">完整备份与恢复</div>
+          <div class="service-row">
+            <span>
+              <strong>数据库和插件</strong>
+              <small>使用 SQLite 一致性快照；恢复前校验归档路径、体积和数据库哈希</small>
+            </span>
+            <div class="service-buttons">
+              <button type="button" :disabled="Boolean(serviceBusy)" @click="runCreateBackup">
+                {{ serviceBusy === 'backup' ? '备份中…' : '创建备份' }}
+              </button>
+              <button
+                type="button"
+                class="danger-text"
+                :disabled="Boolean(serviceBusy)"
+                @click="runRestoreBackup"
+              >
+                {{ serviceBusy === 'restore' ? '恢复中…' : '恢复备份' }}
+              </button>
+            </div>
+          </div>
+          <div class="settings-subtitle">Electron 旧数据迁移</div>
+          <label class="field-row field-row-wide">
+            <span>旧数据目录</span>
+            <input v-model.trim="legacyPath" placeholder="~/.ztools 或 Electron userData" />
+          </label>
+          <div class="service-row">
+            <span>
+              <strong>只读导入 LMDB</strong>
+              <small>迁移设置、应用收藏、启动历史和本地启动项；不导入插件</small>
+            </span>
+            <button type="button" :disabled="serviceBusy === 'legacy'" @click="runLegacyImport">
+              {{ serviceBusy === 'legacy' ? '导入中…' : '开始导入' }}
+            </button>
+          </div>
+          <p v-if="legacyReport" class="service-message">
+            设置 {{ legacyReport.importedSettings ? '1' : '0' }} 项，收藏
+            {{ legacyReport.importedPins }} 项，历史 {{ legacyReport.importedHistory }} 项，本地启动项
+            {{ legacyReport.importedShortcuts }} 项。
+          </p>
+          <p v-if="serviceMessage" class="service-message">{{ serviceMessage }}</p>
+        </section>
+
+        <section v-else-if="settingsSection === 'plugins'" class="settings-body">
+          <div class="settings-subtitle">本地插件</div>
+          <label class="field-row field-row-wide">
+            <span>插件目录</span>
+            <input
+              v-model.trim="pluginInstallPath"
+              placeholder="/绝对路径/插件目录"
+              data-testid="plugin-install-path"
+            />
+          </label>
+          <div class="service-row">
+            <span>
+              <strong>安装或升级</strong>
+              <small>Rust 校验 plugin.json 后复制到隔离插件目录</small>
+            </span>
+            <button
+              type="button"
+              :disabled="pluginBusy === 'install' || !pluginInstallPath.trim()"
+              data-testid="plugin-install-button"
+              @click="installLocalPlugin"
+              >{{ pluginBusy === 'install' ? '安装中…' : '安装目录' }}</button
+            >
+          </div>
+          <div class="service-row">
+            <span>
+              <strong>开发目录热重载</strong>
+              <small>同步到隔离副本；页面文件稳定变化后自动刷新活动插件</small>
+            </span>
+            <button
+              type="button"
+              :disabled="pluginBusy === 'development' || !pluginInstallPath.trim()"
+              @click="registerDevelopmentPlugin"
+              >{{ pluginBusy === 'development' ? '注册中…' : '注册开发目录' }}</button
+            >
+          </div>
+          <div v-if="plugins.length === 0" class="settings-empty">尚未安装插件</div>
+          <div v-for="plugin in plugins" :key="plugin.name" class="plugin-editor">
+            <span>
+              <strong>{{ plugin.title }}</strong>
+              <small>
+                {{ plugin.name }} · {{ plugin.version }}
+                <template v-if="plugin.development"> · 开发监听中</template>
+              </small>
+              <small v-for="note in plugin.compatibilityNotes" :key="note">{{ note }}</small>
+            </span>
+            <div class="plugin-actions">
+              <button type="button" :disabled="pluginBusy === plugin.name" @click="runPlugin(plugin)">
+                运行
+              </button>
+              <button
+                v-if="plugin.development"
+                type="button"
+                :disabled="pluginBusy === `development:${plugin.name}`"
+                @click="stopDevelopmentPlugin(plugin.name)"
+                >停止监听</button
+              >
+              <button
+                type="button"
+                class="danger-text"
+                :disabled="pluginBusy === plugin.name"
+                @click="removePlugin(plugin.name)"
+                >卸载</button
+              >
+              <button
+                type="button"
+                class="danger-text"
+                :disabled="pluginBusy === plugin.name"
+                @click="removePluginWithData(plugin.name)"
+                >卸载并删数据</button
+              >
+            </div>
+          </div>
+          <p v-if="serviceMessage" class="service-message">{{ serviceMessage }}</p>
+        </section>
+
+        <section v-else-if="settingsSection === 'market'" class="settings-body">
+          <div class="market-filters">
+            <label class="field-row field-row-wide">
+              <span>搜索市场</span>
+              <input v-model.trim="marketQuery" placeholder="名称、作者或分类" />
+            </label>
+            <label class="field-row field-row-wide">
+              <span>分类</span>
+              <select v-model="marketCategory">
+                <option v-for="category in marketCategories" :key="category" :value="category">
+                  {{ category }}
+                </option>
+              </select>
+            </label>
+          </div>
+          <div v-if="marketLoading" class="settings-empty">正在读取官方插件市场…</div>
+          <div v-else-if="visibleMarketPlugins.length === 0" class="settings-empty">
+            {{ marketPlugins.length ? '没有匹配插件' : '市场目录尚未加载' }}
+          </div>
+          <div v-for="plugin in visibleMarketPlugins" :key="plugin.name" class="market-plugin-row">
+            <span class="market-plugin-icon">
+              <img v-if="plugin.logo" :src="plugin.logo" alt="" />
+              <template v-else>{{ plugin.title.slice(0, 1).toLocaleUpperCase() }}</template>
+            </span>
+            <span class="market-plugin-copy">
+              <strong>
+                {{ plugin.title }} <small>v{{ plugin.version }}</small>
+              </strong>
+              <small>{{ plugin.description || plugin.name }}</small>
+              <small>
+                {{ plugin.categoryTitle || '未分类' }} · {{ plugin.author || '未知作者' }} ·
+                {{ plugin.sourceLabel || '市场插件' }} · {{ formatPluginSize(plugin.size) }} ·
+                {{ plugin.downloadCount }} 次下载
+              </small>
+              <button
+                v-if="plugin.homepage"
+                class="market-homepage"
+                type="button"
+                @click="openPluginHomepage(plugin.homepage)"
+                >项目主页</button
+              >
+            </span>
+            <span class="market-actions">
+              <button
+                type="button"
+                :disabled="
+                  pluginBusy === `market:${plugin.name}` ||
+                  installedPluginVersions.get(plugin.name) === plugin.version
+                "
+                @click="installMarketPlugin(plugin.name)"
+                >{{
+                  pluginBusy === `market:${plugin.name}`
+                    ? marketProgressLabel(plugin.name)
+                    : marketActionLabel(plugin)
+                }}</button
+              >
+              <button
+                v-if="pluginBusy === `market:${plugin.name}`"
+                type="button"
+                class="danger-text"
+                @click="cancelMarketInstall(plugin.name)"
+                >取消</button
+              >
+            </span>
+          </div>
+          <p v-if="serviceMessage" class="service-message">{{ serviceMessage }}</p>
+        </section>
+
+        <section v-else class="settings-body">
+          <label class="switch-row">
+            <span><strong>共享目录同步</strong><small>可放在 NAS、Syncthing 或网盘目录</small></span>
+            <input v-model="settingsDraft.syncEnabled" type="checkbox" />
+          </label>
+          <label class="field-row field-row-wide">
+            <span>同步目录</span>
+            <input v-model.trim="settingsDraft.syncDirectory" placeholder="/绝对路径/ZTools-Sync" />
+          </label>
+          <label class="field-row">
+            <span>同步间隔（分钟）</span>
+            <input
+              v-model.number="settingsDraft.syncIntervalMinutes"
+              type="number"
+              min="1"
+              max="1440"
+            />
+          </label>
+          <div class="service-row">
+            <span><strong>同步状态</strong><small>{{ snapshot.syncStatus.message }}</small></span>
+            <button type="button" :disabled="serviceBusy === 'sync'" @click="saveAndSync">
+              {{ serviceBusy === 'sync' ? '同步中…' : '保存并同步' }}
+            </button>
+          </div>
+          <label class="switch-row">
+            <span><strong>启动后检查更新</strong><small>只读取发布信息，不静默安装</small></span>
+            <input v-model="settingsDraft.autoCheckUpdates" type="checkbox" />
+          </label>
+          <label class="field-row field-row-wide">
+            <span>发布源</span>
+            <input v-model.trim="settingsDraft.updateFeedUrl" />
+          </label>
+          <label class="field-row field-row-wide">
+            <span>Tauri 签名公钥</span>
+            <input v-model.trim="settingsDraft.updatePublicKey" placeholder="发布前配置 minisign 公钥" />
+          </label>
+          <div class="service-row">
+            <span>
+              <strong>应用更新</strong>
+              <small v-if="updateInfo">当前 {{ updateInfo.currentVersion }} · 最新 {{ updateInfo.latestVersion }}</small>
+              <small v-else>支持 GitHub Release 或 Tauri JSON</small>
+            </span>
+            <button type="button" :disabled="serviceBusy === 'update'" @click="saveAndCheckUpdates">
+              检查更新
+            </button>
+          </div>
+          <div v-if="updateInfo?.updateAvailable && updateInfo.releaseUrl" class="service-row">
+            <span><strong>发现 {{ updateInfo.latestVersion }}</strong><small>签名公钥已配置时可直接安装</small></span>
+            <div class="service-buttons">
+              <button type="button" @click="openUpdatePage">打开下载地址</button>
+              <button
+                v-if="settingsDraft.updatePublicKey"
+                type="button"
+                :disabled="serviceBusy === 'install-update'"
+                @click="runUpdateInstall"
+                >验签安装</button
+              >
+            </div>
+          </div>
+          <div class="service-row">
+            <span><strong>系统通知</strong><small>验证原生通知权限和投递</small></span>
+            <button
+              type="button"
+              :disabled="serviceBusy === 'notification'"
+              @click="testNotification"
+              >发送测试通知</button
+            >
+          </div>
+          <div class="service-row">
+            <span><strong>屏幕截图</strong><small>隐藏启动器后截取鼠标所在显示器并保存 PNG</small></span>
+            <button
+              type="button"
+              :disabled="serviceBusy === 'screenshot'"
+              @click="runScreenCapture"
+              >{{ serviceBusy === 'screenshot' ? '截图中…' : '立即截图' }}</button
+            >
+          </div>
+          <p v-if="serviceMessage" class="service-message">{{ serviceMessage }}</p>
+        </section>
+
+        <div class="settings-actions">
+          <button type="button" class="danger-button" @click="clearHistory">清空历史</button>
+          <span></span>
+          <button type="button" class="secondary-button" @click="settingsOpen = false">取消</button>
+          <button type="submit" class="primary-button">保存</button>
+        </div>
+      </form>
+    </div>
+  </main>
+</template>

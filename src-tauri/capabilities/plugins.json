@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "plugin-capability",
+  "description": "Restricted capability for dynamically loaded ZTools plugin windows",
+  "windows": ["plugin-*"],
+  "permissions": ["core:event:default", "plugin-commands"]
+}

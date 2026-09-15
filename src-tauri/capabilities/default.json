@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "main-capability",
+  "description": "Base capability for the ZTools main window",
+  "windows": ["main"],
+  "permissions": ["core:default", "main-commands"]
+}

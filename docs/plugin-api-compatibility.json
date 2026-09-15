@@ -1,0 +1,38 @@
+{
+  "schemaVersion": 1,
+  "hostVersion": "0.1.0",
+  "runtime": {
+    "node": false,
+    "electron": false,
+    "sidecar": false
+  },
+  "apis": [
+    { "name": "getAppName", "legacyMode": "sync", "mode": "sync-snapshot", "status": "core-supported" },
+    { "name": "getAppVersion", "legacyMode": "sync", "mode": "sync-snapshot", "status": "core-supported" },
+    { "name": "getWindowType", "legacyMode": "sync", "mode": "sync-snapshot", "status": "core-supported" },
+    { "name": "isWindows/isLinux/isMacOS", "legacyMode": "sync", "mode": "sync-snapshot", "status": "core-supported" },
+    { "name": "isDev", "legacyMode": "sync", "mode": "sync-snapshot", "status": "core-supported" },
+    { "name": "hasCapability", "legacyMode": "new", "mode": "sync", "status": "core-supported" },
+    { "name": "onPluginEnter", "legacyMode": "callback", "mode": "sync-register", "status": "core-supported" },
+    { "name": "onPluginOut", "legacyMode": "callback", "mode": "sync-register", "status": "core-supported" },
+    { "name": "outPlugin/hideMainWindow", "legacyMode": "side-effect", "mode": "async-queued", "status": "core-supported" },
+    { "name": "copyText", "legacyMode": "sync-boolean", "mode": "sync-return-async-persist", "status": "core-supported" },
+    { "name": "clipboard.write/clipboard.writeContent", "legacyMode": "async", "mode": "async", "status": "text-only" },
+    { "name": "db.allDocs/db.get/db.put/db.remove/db.bulkDocs", "legacyMode": "sync", "mode": "sync-mirror-async-persist", "status": "core-supported" },
+    { "name": "db.promises", "legacyMode": "async", "mode": "async", "status": "core-supported" },
+    { "name": "showNotification/showToast", "legacyMode": "async", "mode": "async", "status": "core-supported" },
+    { "name": "onMainPush", "legacyMode": "callback", "mode": "registration-only", "status": "partial" },
+    { "name": "db.postAttachment/getAttachment/getAttachmentType", "legacyMode": "mixed", "mode": "sync-mirror-and-async", "status": "core-supported" },
+    { "name": "dbStorage", "legacyMode": "sync", "mode": "sync-mirror-async-persist", "status": "core-supported" },
+    { "name": "getFeatures/setFeature/removeFeature", "legacyMode": "sync", "mode": "sync-mirror-async-persist", "status": "core-supported" },
+    { "name": "file", "legacyMode": "preload", "mode": "async-granted-paths", "status": "core-supported" },
+    { "name": "dialog.open/dialog.save", "legacyMode": "new", "mode": "async", "status": "core-supported" },
+    { "name": "showOpenDialog/showSaveDialog", "legacyMode": "sync", "mode": "seeded-paths-only", "status": "needs-plugin-adaptation" },
+    { "name": "shellOpenExternal/shellOpenPath/shellShowItemInFolder", "legacyMode": "sync", "mode": "async", "status": "core-supported" },
+    { "name": "screen.getAllDisplays/screen.getCursorScreenPoint/screen.capture", "legacyMode": "mixed", "mode": "snapshot-and-async", "status": "core-supported" },
+    { "name": "input.typeText/input.tapKey/input.paste", "legacyMode": "mixed", "mode": "async", "status": "core-supported" },
+    { "name": "window current-instance controls", "legacyMode": "mixed", "mode": "async", "status": "core-supported" },
+    { "name": "window child creation/parent messaging", "legacyMode": "mixed", "mode": "unavailable", "status": "planned-core" },
+    { "name": "ai/payment/providers/zbrowser/ubrowser/runFFmpeg", "legacyMode": "mixed", "mode": "unavailable", "status": "out-of-scope" }
+  ]
+}

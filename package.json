@@ -1,0 +1,29 @@
+{
+  "name": "ztools-tauri",
+  "version": "0.1.0",
+  "private": true,
+  "description": "A native application launcher built with Tauri 2",
+  "license": "MIT",
+  "scripts": {
+    "dev": "tauri dev",
+    "dev:web": "vite",
+    "build": "tauri build",
+    "build:web": "pnpm typecheck && vite build",
+    "typecheck": "vue-tsc --noEmit",
+    "check": "pnpm typecheck && cargo check --manifest-path src-tauri/Cargo.toml"
+  },
+  "dependencies": {
+    "@tauri-apps/api": "2.11.1",
+    "pinyin-pro": "3.27.0",
+    "vue": "3.5.26"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "2.11.4",
+    "@types/node": "22.19.3",
+    "@vitejs/plugin-vue": "6.0.3",
+    "typescript": "5.9.3",
+    "vite": "7.3.0",
+    "vue-tsc": "3.2.6"
+  },
+  "packageManager": "pnpm@12.4.1"
+}
