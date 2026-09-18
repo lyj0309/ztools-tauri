@@ -1047,14 +1047,6 @@ pub(crate) fn launch_plugin(
         return Ok(());
     }
 
-    runtime.register_instance(&label, plugin_name)?;
-    let payload_paths = plugin_payload_paths(&action.payload);
-    if !payload_paths.is_empty() {
-        if let Err(error) = runtime.grant_paths(&label, payload_paths) {
-            runtime.unregister_instance(&label);
-            return Err(error);
-        }
-    }
     let main_url = format!(
         "ztools-plugin://localhost/{}/{}",
         manifest.name,
@@ -1107,8 +1099,16 @@ pub(crate) fn launch_plugin(
     let data_directory = runtime.root().join(".webview-data").join(&manifest.name);
     fs::create_dir_all(&data_directory).map_err(|error| error.to_string())?;
 
-    // 创建插件窗口前收起主启动器，避免置顶主窗遮挡动态 Webview。
-    hide_main_window(app)?;
+    // 完成所有可能失败的资源准备后，再发布插件窗口身份和路径权限。
+    runtime.register_instance(&label, plugin_name)?;
+    let payload_paths = plugin_payload_paths(&action.payload);
+    if !payload_paths.is_empty() {
+        if let Err(error) = runtime.grant_paths(&label, payload_paths) {
+            runtime.unregister_instance(&label);
+            return Err(error);
+        }
+    }
+    // WebView2 可能需要几秒初始化，创建完成前保留主窗口供用户查看和操作。
     let build_result = WebviewWindowBuilder::new(app, &label, WebviewUrl::External(url))
         .title(&manifest.title)
         .inner_size(720.0, 560.0)
@@ -1140,8 +1140,16 @@ pub(crate) fn launch_plugin(
             }
         }
     });
-    window.show().map_err(|error| error.to_string())?;
-    window.set_focus().map_err(|error| error.to_string())?;
+    if let Err(error) = hide_main_window(app)
+        .and_then(|_| window.show().map_err(|error| error.to_string()))
+        .and_then(|_| window.set_focus().map_err(|error| error.to_string()))
+    {
+        // 创建成功但切换窗口失败时关闭孤儿窗口，并恢复可操作的主启动器。
+        let _ = window.close();
+        runtime.unregister_instance(&label);
+        let _ = restore_main_window(app);
+        return Err(format!("无法显示插件窗口：{error}"));
+    }
     Ok(())
 }
 

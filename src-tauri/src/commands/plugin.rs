@@ -172,9 +172,9 @@ pub(crate) fn uninstall_plugin(
     list_installed_plugins(&runtime, &state)
 }
 
-/// 启动指定插件 feature，复用已存在的单例插件窗口。
+/// 在异步命令工作线程中启动插件 feature，避免 Windows 创建 WebView2 时阻塞主事件循环。
 #[tauri::command]
-pub(crate) fn launch_plugin_feature(
+pub(crate) async fn launch_plugin_feature(
     plugin_name: String,
     feature_code: String,
     payload: Option<serde_json::Value>,

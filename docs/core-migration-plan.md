@@ -14,7 +14,7 @@
 
 当前无插件宿主是这项工作的基础，不代表核心迁移完成。
 
-截至 2026-09-15，首批插件链路已落地：官方市场目录和 ZIP 安装、`plugin.json` 校验、独立插件 Webview、私有资源协议、文本/正则/files feature，以及生命周期、数据库/附件、dbStorage、动态 feature、文本剪贴板、受限文件/Shell/网络和异步对话框 API。`timestamp`、`calculation-paper` 可原包运行；`file-renamer` 和 `web-quick-open` 由不执行 Node 的内置 Rust 适配桥实测通过。窗口、屏幕、输入、开发热重载、完整市场安装保障和其余代表插件仍按本方案继续，不能据此把核心迁移标为完成。
+截至 2026-09-18，首批插件链路已落地：官方市场目录和 ZIP 安装、`plugin.json` 校验、独立插件 Webview、私有资源协议、文本/正则/files feature，以及生命周期、数据库/附件、dbStorage、动态 feature、文本剪贴板、受限文件/Shell/网络和异步对话框 API。`timestamp`、`calculation-paper` 在 Linux 开发环境可原包运行；`file-renamer` 和 `web-quick-open` 由不执行 Node 的内置 Rust 适配桥在 Linux 实测通过。Windows 便携版曾报告计算稿纸打开冻结，异步窗口创建修复仍需 Windows 实测确认；不能据此把核心迁移标为完成。
 
 ## 2. 范围边界
 

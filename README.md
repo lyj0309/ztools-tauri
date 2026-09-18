@@ -17,7 +17,7 @@ ZTools 桌面宿主的 Tauri 2 重构版，使用 Rust、Vue 3、TypeScript 和 
 - 第三方插件目录安装、升级和卸载；`plugin.json` 校验、独立 Webview、私有资源协议与窗口权限隔离。
 - 官方插件市场匿名目录、分类、搜索、详情元数据、进度、取消和 ZIP 安装；下载源、压缩包路径、文件数、体积和归档哈希均由 Rust 处理。
 - `window.ztools` 兼容 API：生命周期、设备快照、`db`/附件、dbStorage、动态 feature、文本剪贴板、通知、文件、异步对话框、Shell、屏幕截图、基础输入、当前窗口控制和能力检测。
-- 应用、插件 feature、固定系统指令和 HTTP(S) 网址统一搜索；已验证时间戳、计算稿纸、文件批量重命名、网页快开、UUID、贷款计算器和剪贴板 7 个代表插件。
+- 应用、插件 feature、固定系统指令和 HTTP(S) 网址统一搜索；上述 7 个代表插件已在 Linux 开发环境验证，Windows/macOS 的实际交互仍需单独验收。
 - 插件开发目录注册、隔离副本同步和活动窗口热重载。
 - 无 Node 插件类型声明、开发说明和最小示例；参见[插件开发文档](docs/plugin-development.md)。
 - GitHub Actions 在 Linux 执行完整检查，并从版本标签构建 Windows、Linux、macOS Intel/Apple Silicon 原生包。
