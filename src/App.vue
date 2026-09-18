@@ -675,7 +675,7 @@ async function loadPluginMarket(): Promise<void> {
 }
 
 /**
- * 下载并安装市场插件，再使用宿主返回值刷新已安装状态。
+ * 下载并安装市场插件，再根据兼容状态提示是否能够启动。
  * @param pluginName 市场插件名称。
  * @returns 下载、校验和原子安装完成后的 Promise。
  */
@@ -684,7 +684,12 @@ async function installMarketPlugin(pluginName: string): Promise<void> {
   serviceMessage.value = ''
   try {
     plugins.value = await installPluginFromMarket(pluginName)
-    serviceMessage.value = `${pluginName} 已安装`
+    // 安装成功不等于旧 Node preload 已适配，避免把暂不能运行的插件误报为可用。
+    const installed = plugins.value.find((plugin) => plugin.name === pluginName)
+    serviceMessage.value =
+      installed?.compatibility === 'needs-adaptation'
+        ? `${installed.title} 已安装，但此版本含未适配的 Node/Electron preload，暂不能运行`
+        : `${installed?.title || pluginName} 已安装`
   } catch (error) {
     serviceMessage.value = String(error)
   } finally {
@@ -1798,8 +1803,12 @@ onUnmounted(() => {
               <small v-for="note in plugin.compatibilityNotes" :key="note">{{ note }}</small>
             </span>
             <div class="plugin-actions">
-              <button type="button" :disabled="pluginBusy === plugin.name" @click="runPlugin(plugin)">
-                运行
+              <button
+                type="button"
+                :disabled="pluginBusy === plugin.name || plugin.compatibility === 'needs-adaptation'"
+                @click="runPlugin(plugin)"
+              >
+                {{ plugin.compatibility === 'needs-adaptation' ? '需适配' : '运行' }}
               </button>
               <button
                 v-if="plugin.development"

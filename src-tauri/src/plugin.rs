@@ -981,6 +981,10 @@ fn extract_plugin_zip(bytes: &[u8], destination: &Path) -> Result<(), String> {
             .unix_mode()
             .is_some_and(|mode| mode & 0o170000 == 0o120000)
         {
+            // npm 的 .bin 链接只用于命令行构建；插件运行不需要，跳过且不在磁盘创建链接。
+            if relative.parent() == Some(Path::new("preload/node_modules/.bin")) {
+                continue;
+            }
             return Err("插件 ZIP 不能包含符号链接".to_owned());
         }
         total_bytes = total_bytes.saturating_add(entry.size());
@@ -1282,7 +1286,7 @@ fn plugin_summary(manifest: &PluginManifest, directory: &Path) -> InstalledPlugi
         notes.push("Electron preload 已由内置 Rust 兼容桥适配，不加载 Node".to_owned());
         "adapted"
     } else {
-        notes.push("包含 Electron preload，需要无 Node 兼容审计".to_owned());
+        notes.push("包含 Node/Electron preload，当前无法启动".to_owned());
         "needs-adaptation"
     };
     let logo_url = if manifest.logo.trim().is_empty() {
@@ -2053,14 +2057,16 @@ fn now_millis() -> u128 {
 #[cfg(test)]
 mod tests {
     use super::{
-        preload_adapter_script, read_manifest, resolve_plugin_asset, validate_market_download_url,
-        PluginRuntime,
+        extract_plugin_zip, preload_adapter_script, read_manifest, resolve_plugin_asset,
+        validate_market_download_url, PluginRuntime,
     };
     use std::{
         fs,
+        io::{Cursor, Write},
         path::{Path, PathBuf},
         time::SystemTime,
     };
+    use zip::{write::SimpleFileOptions, ZipWriter};
 
     /// 创建唯一临时目录，避免插件安装测试写入真实应用数据。
     fn fixture_root(name: &str) -> PathBuf {
@@ -2177,6 +2183,55 @@ mod tests {
             validate_market_download_url("https://zosen.link.evil.example/plugin.zip").is_err()
         );
         assert!(validate_market_download_url("https://127.0.0.1/plugin.zip").is_err());
+    }
+
+    /// 验证市场包里的 npm 命令链接可忽略，而其他符号链接仍会阻止安装。
+    #[test]
+    fn ignores_only_npm_command_symlinks_in_market_archive() {
+        let mut archive = ZipWriter::new(Cursor::new(Vec::new()));
+        let options = SimpleFileOptions::default();
+        archive
+            .start_file("plugin.json", options)
+            .expect("manifest entry should start");
+        archive
+            .write_all(
+                br#"{"name":"fixture","title":"Fixture","version":"1.0.0","main":"index.html"}"#,
+            )
+            .expect("manifest should be written");
+        archive
+            .start_file("index.html", options)
+            .expect("entry should start");
+        archive
+            .write_all(b"<html></html>")
+            .expect("entry should be written");
+        archive
+            .add_symlink(
+                "preload/node_modules/.bin/acorn",
+                "../acorn/bin/acorn",
+                options,
+            )
+            .expect("npm command link should be written");
+        let bytes = archive
+            .finish()
+            .expect("archive should finish")
+            .into_inner();
+        let root = fixture_root("market-bin-link");
+        extract_plugin_zip(&bytes, &root).expect("npm command link should be ignored");
+        assert!(root.join("plugin.json").is_file());
+        assert!(!root.join("preload/node_modules/.bin/acorn").exists());
+        fs::remove_dir_all(root).expect("fixture should clean up");
+
+        let mut archive = ZipWriter::new(Cursor::new(Vec::new()));
+        archive
+            .add_symlink("preload/runtime.js", "../secret", options)
+            .expect("runtime link should be written");
+        let bytes = archive
+            .finish()
+            .expect("archive should finish")
+            .into_inner();
+        let root = fixture_root("market-runtime-link");
+        assert!(extract_plugin_zip(&bytes, &root).is_err());
+        fs::remove_dir_all(root).expect("fixture should clean up");
     }
 
     /// 验证取消标记能被下载循环观察，并在任务结束后释放名称占用。
