@@ -204,6 +204,9 @@ jobs:
               try {
                 $targets = Invoke-RestMethod -Uri 'http://127.0.0.1:9222/json/list'
                 $target = @($targets) | Where-Object { $_.title -eq $Title } | Select-Object -First 1
+                if (-not $target) {
+                  $target = @($targets) | Where-Object { $_.type -eq 'page' } | Select-Object -First 1
+                }
                 if ($target) { break }
               } catch {
                 Start-Sleep -Milliseconds 250
