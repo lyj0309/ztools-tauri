@@ -266,8 +266,12 @@ jobs:
             $pinButtonX = $endX - 67
             $pinButtonY = $endY + 30
             [DesktopNative]::SetCursorPos($pinButtonX, $pinButtonY) | Out-Null
+            Start-Sleep -Milliseconds 500
             [DesktopNative]::mouse_event(0x0002, 0, 0, 0, [UIntPtr]::Zero)
+            Start-Sleep -Milliseconds 150
             [DesktopNative]::mouse_event(0x0004, 0, 0, 0, [UIntPtr]::Zero)
+            Start-Sleep -Seconds 1
+            Save-DesktopScreenshot -Path 'artifacts/04-after-pin-click.png'
             $pin = Wait-ProcessWindowNearSize `
               -ProcessId $screenshotProcess.Id `
               -ExpectedWidth ($endX - $startX) `
@@ -276,7 +280,7 @@ jobs:
             $pinRect = New-Object DesktopNative+Rect
             [DesktopNative]::GetWindowRect($pin, [ref]$pinRect) | Out-Null
             $diagnostics.pinBounds = @($pinRect.Left, $pinRect.Top, $pinRect.Right, $pinRect.Bottom)
-            Save-DesktopScreenshot -Path 'artifacts/04-pin.png'
+            Save-DesktopScreenshot -Path 'artifacts/05-pin.png'
           } catch {
             $diagnostics.error = $_.Exception.Message
             Save-DesktopScreenshot -Path 'artifacts/99-error.png'
