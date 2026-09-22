@@ -1,6 +1,7 @@
 use std::{
     collections::HashMap,
     fs,
+    io::Cursor,
     path::{Path, PathBuf},
     sync::{
         atomic::{AtomicU64, Ordering},
@@ -188,12 +189,12 @@ pub(crate) async fn start_editor(app: AppHandle, main: WebviewWindow) -> Result<
         crate::commands::launcher::show_main_window(&app);
         return Err(error.to_string());
     }
-    schedule_e2e_pin_trigger(&editor);
+    schedule_e2e_pin_trigger(&app, &editor);
     Ok(())
 }
 
 /// 在隔离测试模式下等待外部触发文件，再点击截图编辑器的贴图按钮。
-fn schedule_e2e_pin_trigger(editor: &WebviewWindow) {
+fn schedule_e2e_pin_trigger(app: &AppHandle, editor: &WebviewWindow) {
     if std::env::var("ZTOOLS_E2E").as_deref() != Ok("1") {
         return;
     }
@@ -201,6 +202,7 @@ fn schedule_e2e_pin_trigger(editor: &WebviewWindow) {
         return;
     };
     let trigger = PathBuf::from(trigger);
+    let app = app.clone();
     let editor = editor.clone();
     std::thread::spawn(move || {
         // 等待桌面自动化完成选区，超时后退出，避免测试钩子常驻。
@@ -210,12 +212,43 @@ fn schedule_e2e_pin_trigger(editor: &WebviewWindow) {
                 let result =
                     editor.eval("document.querySelector('[data-action=\"pin\"]')?.click()");
                 eprintln!("[e2e] screenshot pin trigger evaluated: {result:?}");
+                std::thread::sleep(std::time::Duration::from_secs(2));
+                if app.get_webview_window(EDITOR_LABEL).is_some() {
+                    // 发布版 WebView2 可能忽略后台 eval；回退到正式贴图命令验证原生窗口链路。
+                    let result = create_e2e_native_pin(&app, &editor);
+                    eprintln!("[e2e] screenshot native pin fallback: {result:?}");
+                }
                 return;
             }
             std::thread::sleep(std::time::Duration::from_millis(250));
         }
         eprintln!("[e2e] screenshot pin trigger timed out");
     });
+}
+
+/// 从当前截图源裁剪固定测试区域并调用正式贴图命令。
+fn create_e2e_native_pin(app: &AppHandle, editor: &WebviewWindow) -> Result<(), String> {
+    let runtime = app.state::<ScreenshotRuntime>();
+    let source = read_png(&runtime.editor_source()?)?;
+    let image = decode_png(&source)?;
+    let x = 120_u32.min(image.width().saturating_sub(1));
+    let y = 100_u32.min(image.height().saturating_sub(1));
+    let width = 700_u32.min(image.width().saturating_sub(x));
+    let height = 440_u32.min(image.height().saturating_sub(y));
+    let cropped = image.crop_imm(x, y, width, height);
+    let mut output = Cursor::new(Vec::new());
+    cropped
+        .write_to(&mut output, image::ImageFormat::Png)
+        .map_err(|error| format!("无法编码 E2E 贴图：{error}"))?;
+    screenshot_pin(
+        output.into_inner(),
+        f64::from(x),
+        f64::from(y),
+        f64::from(width),
+        f64::from(height),
+        app.clone(),
+        editor.clone(),
+    )
 }
 
 /// 返回当前编辑器源 PNG 的原始字节。

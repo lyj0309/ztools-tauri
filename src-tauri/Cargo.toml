@@ -1,6 +1,6 @@
 [package]
 name = "ztools-tauri"
-version = "0.1.6"
+version = "0.1.7"
 description = "ZTools Tauri desktop host"
 authors = ["ZToolsCenter"]
 license = "MIT"
