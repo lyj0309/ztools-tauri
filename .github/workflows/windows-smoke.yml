@@ -1,0 +1,199 @@
+name: Windows Desktop Smoke
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Release tag whose portable executable is tested
+        required: true
+        default: v0.1.4
+
+permissions:
+  contents: read
+
+concurrency:
+  group: windows-desktop-smoke-${{ inputs.release_tag }}
+  cancel-in-progress: false
+
+jobs:
+  smoke:
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download released portable executable
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        run: |
+          New-Item -ItemType Directory -Force artifacts | Out-Null
+          $asset = "ZTools_$($env:RELEASE_TAG)_windows_x64_portable.exe"
+          gh release download $env:RELEASE_TAG --pattern $asset --dir artifacts
+          Get-FileHash "artifacts/$asset" -Algorithm SHA256 |
+            Select-Object Algorithm, Hash, Path |
+            ConvertTo-Json | Set-Content artifacts/release-hash.json
+
+      - name: Exercise launcher, screenshot editor, and floating pin
+        shell: pwsh
+        env:
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Add-Type -AssemblyName System.Drawing
+          Add-Type -AssemblyName System.Windows.Forms
+          Add-Type @'
+          using System;
+          using System.Runtime.InteropServices;
+
+          public static class DesktopNative {
+              [StructLayout(LayoutKind.Sequential)]
+              public struct Rect {
+                  public int Left;
+                  public int Top;
+                  public int Right;
+                  public int Bottom;
+              }
+
+              [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+              public static extern IntPtr FindWindow(string className, string windowName);
+
+              [DllImport("user32.dll")]
+              public static extern bool IsWindowVisible(IntPtr window);
+
+              [DllImport("user32.dll")]
+              public static extern bool SetForegroundWindow(IntPtr window);
+
+              [DllImport("user32.dll")]
+              public static extern bool GetWindowRect(IntPtr window, out Rect rect);
+
+              [DllImport("user32.dll")]
+              public static extern bool SetCursorPos(int x, int y);
+
+              [DllImport("user32.dll")]
+              public static extern void mouse_event(uint flags, uint dx, uint dy, uint data, UIntPtr extraInfo);
+
+              [DllImport("user32.dll")]
+              public static extern void keybd_event(byte virtualKey, byte scanCode, uint flags, UIntPtr extraInfo);
+          }
+          '@
+
+          function Wait-Window {
+            param([string]$Title, [int]$TimeoutSeconds = 45)
+            $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+            while ((Get-Date) -lt $deadline) {
+              $window = [DesktopNative]::FindWindow($null, $Title)
+              if ($window -ne [IntPtr]::Zero -and [DesktopNative]::IsWindowVisible($window)) {
+                return $window
+              }
+              Start-Sleep -Milliseconds 250
+            }
+            throw "Timed out waiting for visible window: $Title"
+          }
+
+          function Save-DesktopScreenshot {
+            param([string]$Path)
+            $bounds = [System.Windows.Forms.SystemInformation]::VirtualScreen
+            $bitmap = New-Object System.Drawing.Bitmap $bounds.Width, $bounds.Height
+            $graphics = [System.Drawing.Graphics]::FromImage($bitmap)
+            try {
+              $graphics.CopyFromScreen($bounds.Location, [System.Drawing.Point]::Empty, $bounds.Size)
+              $bitmap.Save($Path, [System.Drawing.Imaging.ImageFormat]::Png)
+            } finally {
+              $graphics.Dispose()
+              $bitmap.Dispose()
+            }
+          }
+
+          function Stop-TestProcess {
+            param([System.Diagnostics.Process]$Process)
+            if ($Process -and -not $Process.HasExited) {
+              Stop-Process -Id $Process.Id -Force
+              $Process.WaitForExit(10000) | Out-Null
+            }
+          }
+
+          $asset = "ZTools_$($env:RELEASE_TAG)_windows_x64_portable.exe"
+          $executable = (Resolve-Path "artifacts/$asset").Path
+          $testRoot = Join-Path $env:RUNNER_TEMP 'ztools-windows-smoke'
+          $env:ZTOOLS_E2E = '1'
+          $env:ZTOOLS_DATA_ROOT = Join-Path $testRoot 'data'
+          $env:ZTOOLS_PLUGIN_ROOT = Join-Path $testRoot 'plugins'
+          $diagnostics = [ordered]@{
+            releaseTag = $env:RELEASE_TAG
+            executable = $executable
+            launcherVisible = $false
+            editorVisible = $false
+            pinVisible = $false
+          }
+
+          $launcherProcess = $null
+          $screenshotProcess = $null
+          try {
+            Remove-Item Env:ZTOOLS_E2E_PLUGIN_NAME -ErrorAction SilentlyContinue
+            Remove-Item Env:ZTOOLS_E2E_PLUGIN_FEATURE -ErrorAction SilentlyContinue
+            $launcherProcess = Start-Process -FilePath $executable -PassThru
+            $launcher = Wait-Window -Title 'ZTools'
+            $diagnostics.launcherVisible = $true
+            Save-DesktopScreenshot -Path 'artifacts/01-launcher.png'
+            Stop-TestProcess -Process $launcherProcess
+            Start-Sleep -Seconds 2
+
+            $env:ZTOOLS_E2E_PLUGIN_NAME = 'screenshot'
+            $env:ZTOOLS_E2E_PLUGIN_FEATURE = 'capture'
+            $screenshotProcess = Start-Process -FilePath $executable -PassThru
+            $editor = Wait-Window -Title 'ZTools 截图'
+            $diagnostics.editorVisible = $true
+            $editorRect = New-Object DesktopNative+Rect
+            if (-not [DesktopNative]::GetWindowRect($editor, [ref]$editorRect)) {
+              throw 'Unable to read screenshot editor bounds'
+            }
+            $diagnostics.editorBounds = @($editorRect.Left, $editorRect.Top, $editorRect.Right, $editorRect.Bottom)
+            if (($editorRect.Right - $editorRect.Left) -lt 800 -or ($editorRect.Bottom - $editorRect.Top) -lt 600) {
+              throw 'Screenshot editor did not cover a usable desktop area'
+            }
+            Save-DesktopScreenshot -Path 'artifacts/02-editor.png'
+
+            [DesktopNative]::SetForegroundWindow($editor) | Out-Null
+            $startX = $editorRect.Left + 120
+            $startY = $editorRect.Top + 100
+            $endX = [Math]::Min($editorRect.Right - 180, $startX + 700)
+            $endY = [Math]::Min($editorRect.Bottom - 160, $startY + 440)
+            [DesktopNative]::SetCursorPos($startX, $startY) | Out-Null
+            [DesktopNative]::mouse_event(0x0002, 0, 0, 0, [UIntPtr]::Zero)
+            for ($step = 1; $step -le 12; $step++) {
+              $x = [Math]::Round($startX + (($endX - $startX) * $step / 12))
+              $y = [Math]::Round($startY + (($endY - $startY) * $step / 12))
+              [DesktopNative]::SetCursorPos($x, $y) | Out-Null
+              Start-Sleep -Milliseconds 35
+            }
+            [DesktopNative]::mouse_event(0x0004, 0, 0, 0, [UIntPtr]::Zero)
+            Start-Sleep -Seconds 1
+            Save-DesktopScreenshot -Path 'artifacts/03-selection.png'
+
+            [DesktopNative]::keybd_event(0x50, 0, 0, [UIntPtr]::Zero)
+            [DesktopNative]::keybd_event(0x50, 0, 0x0002, [UIntPtr]::Zero)
+            $pin = Wait-Window -Title 'ZTools 贴图'
+            $diagnostics.pinVisible = $true
+            $pinRect = New-Object DesktopNative+Rect
+            [DesktopNative]::GetWindowRect($pin, [ref]$pinRect) | Out-Null
+            $diagnostics.pinBounds = @($pinRect.Left, $pinRect.Top, $pinRect.Right, $pinRect.Bottom)
+            Save-DesktopScreenshot -Path 'artifacts/04-pin.png'
+          } catch {
+            $diagnostics.error = $_.Exception.Message
+            Save-DesktopScreenshot -Path 'artifacts/99-error.png'
+            throw
+          } finally {
+            $diagnostics | ConvertTo-Json -Depth 4 | Set-Content artifacts/diagnostics.json
+            Stop-TestProcess -Process $launcherProcess
+            Stop-TestProcess -Process $screenshotProcess
+          }
+
+      - name: Upload Windows desktop evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-desktop-smoke-${{ inputs.release_tag }}
+          path: artifacts
+          if-no-files-found: error
