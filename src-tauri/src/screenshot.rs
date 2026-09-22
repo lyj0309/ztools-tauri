@@ -204,23 +204,33 @@ fn schedule_e2e_pin_trigger(app: &AppHandle, editor: &WebviewWindow) {
     let trigger = PathBuf::from(trigger);
     let app = app.clone();
     let editor = editor.clone();
-    std::thread::spawn(move || {
-        // 等待桌面自动化完成选区，超时后退出，避免测试钩子常驻。
-        for _ in 0..120 {
-            if trigger.is_file() {
-                let _ = fs::remove_file(&trigger);
-                let result =
-                    editor.eval("document.querySelector('[data-action=\"pin\"]')?.click()");
-                eprintln!("[e2e] screenshot pin trigger evaluated: {result:?}");
-                std::thread::sleep(std::time::Duration::from_secs(2));
-                // 发布版 WebView2 可能接受但不执行后台 eval；固定调用正式命令验证原生窗口链路。
-                let result = create_e2e_native_pin(&app, &editor);
-                eprintln!("[e2e] screenshot native pin fallback: {result:?}");
-                return;
+    tauri::async_runtime::spawn(async move {
+        let triggered = tauri::async_runtime::spawn_blocking(move || {
+            // 等待桌面自动化完成选区，超时后退出，避免测试钩子常驻。
+            for _ in 0..120 {
+                if trigger.is_file() {
+                    let _ = fs::remove_file(&trigger);
+                    return true;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(250));
             }
-            std::thread::sleep(std::time::Duration::from_millis(250));
+            false
+        })
+        .await
+        .unwrap_or(false);
+        if !triggered {
+            eprintln!("[e2e] screenshot pin trigger timed out");
+            return;
         }
-        eprintln!("[e2e] screenshot pin trigger timed out");
+        let result = editor.eval("document.querySelector('[data-action=\"pin\"]')?.click()");
+        eprintln!("[e2e] screenshot pin trigger evaluated: {result:?}");
+        let _ = tauri::async_runtime::spawn_blocking(|| {
+            std::thread::sleep(std::time::Duration::from_secs(2));
+        })
+        .await;
+        // 发布版 WebView2 可能接受但不执行后台 eval；固定调用正式命令验证原生窗口链路。
+        let result = create_e2e_native_pin(&app, &editor);
+        eprintln!("[e2e] screenshot native pin fallback: {result:?}");
     });
 }
 
@@ -238,22 +248,15 @@ fn create_e2e_native_pin(app: &AppHandle, editor: &WebviewWindow) -> Result<(), 
     cropped
         .write_to(&mut output, image::ImageFormat::Png)
         .map_err(|error| format!("无法编码 E2E 贴图：{error}"))?;
-    let data = output.into_inner();
-    let pin_app = app.clone();
-    let pin_editor = editor.clone();
-    tauri::async_runtime::spawn(async move {
-        let result = screenshot_pin(
-            data,
-            f64::from(x),
-            f64::from(y),
-            f64::from(width),
-            f64::from(height),
-            pin_app,
-            pin_editor,
-        );
-        eprintln!("[e2e] screenshot native pin result: {result:?}");
-    });
-    Ok(())
+    screenshot_pin(
+        output.into_inner(),
+        f64::from(x),
+        f64::from(y),
+        f64::from(width),
+        f64::from(height),
+        app.clone(),
+        editor.clone(),
+    )
 }
 
 /// 返回当前编辑器源 PNG 的原始字节。
