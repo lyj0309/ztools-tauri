@@ -54,6 +54,39 @@ const BUNDLED_PLUGIN_FILES: &[BundledPlugin] = &[
             ),
         ],
     ),
+    (
+        "screenshot",
+        &[
+            (
+                "plugin.json",
+                include_bytes!("../resources/default-plugins/screenshot/plugin.json"),
+            ),
+            (
+                "index.html",
+                include_bytes!("../resources/default-plugins/screenshot/index.html"),
+            ),
+            (
+                "screenshot.js",
+                include_bytes!("../resources/default-plugins/screenshot/screenshot.js"),
+            ),
+            (
+                "screenshot.css",
+                include_bytes!("../resources/default-plugins/screenshot/screenshot.css"),
+            ),
+            (
+                "pin.html",
+                include_bytes!("../resources/default-plugins/screenshot/pin.html"),
+            ),
+            (
+                "pin.js",
+                include_bytes!("../resources/default-plugins/screenshot/pin.js"),
+            ),
+            (
+                "pin.css",
+                include_bytes!("../resources/default-plugins/screenshot/pin.css"),
+            ),
+        ],
+    ),
 ];
 
 #[derive(Clone, Debug, Deserialize)]
@@ -1223,7 +1256,10 @@ fn resolve_plugin_asset(
     let mut components = uri_path.trim_start_matches('/').split('/');
     let plugin_name = components.next().unwrap_or_default();
     validate_plugin_name(plugin_name)?;
-    if webview_label != plugin_window_label(plugin_name) {
+    let base_label = plugin_window_label(plugin_name);
+    let is_screenshot_pin =
+        plugin_name == "screenshot" && webview_label.starts_with("plugin-screenshot-pin-");
+    if webview_label != base_label && !is_screenshot_pin {
         return Err("插件窗口与资源身份不匹配".to_owned());
     }
     let relative = components.collect::<PathBuf>();
@@ -2098,7 +2134,7 @@ mod tests {
         .expect("fixture manifest should be writable");
     }
 
-    /// 验证空数据目录会得到两个默认插件，且内嵌文件能在损坏后自动恢复。
+    /// 验证空数据目录会得到三个默认插件，且内嵌文件能在损坏后自动恢复。
     #[test]
     fn installs_and_repairs_bundled_plugins() {
         let root = fixture_root("bundled-root");
@@ -2110,10 +2146,11 @@ mod tests {
         let plugins = runtime
             .installed_plugins()
             .expect("bundled plugins should list");
-        assert_eq!(plugins.len(), 2);
+        assert_eq!(plugins.len(), 3);
         assert!(plugins.iter().all(|plugin| plugin.built_in));
         assert!(plugins.iter().any(|plugin| plugin.name == "setting"));
         assert!(plugins.iter().any(|plugin| plugin.name == "system"));
+        assert!(plugins.iter().any(|plugin| plugin.name == "screenshot"));
         assert!(runtime.uninstall("setting").is_err());
 
         // 模拟用户目录中的 manifest 被截断，再次启动应恢复编译时版本。
@@ -2167,8 +2204,20 @@ mod tests {
         let path = resolve_plugin_asset(&root, "plugin-fixture", "/fixture/assets/main.js")
             .expect("owned asset should resolve");
         assert!(path.ends_with("assets/main.js"));
+        assert!(
+            resolve_plugin_asset(&root, "plugin-fixture-secondary-1", "/fixture/index.html")
+                .is_err()
+        );
         assert!(resolve_plugin_asset(&root, "plugin-other", "/fixture/index.html").is_err());
         assert!(resolve_plugin_asset(&root, "plugin-fixture", "/fixture/../plugin.json").is_err());
+
+        // 只有宿主创建的截图贴图子窗口可以读取同一个内置插件目录。
+        let screenshot = root.join("screenshot");
+        write_fixture(&screenshot, "screenshot", "1.0.0");
+        assert!(
+            resolve_plugin_asset(&root, "plugin-screenshot-pin-1", "/screenshot/index.html")
+                .is_ok()
+        );
         fs::remove_dir_all(root).expect("asset fixture should clean up");
     }
 

@@ -398,7 +398,7 @@ pub(crate) fn hide_main_window(window: WebviewWindow) -> Result<(), String> {
     window.hide().map_err(|error| error.to_string())
 }
 
-/// 显示主窗口、在鼠标所在屏幕的工作区居中并把焦点交给搜索页。
+/// 显示主窗口、在鼠标所在屏幕顶部六分之一处水平居中并把焦点交给搜索页。
 pub(crate) fn show_main_window(app: &AppHandle) {
     if let Some(window) = app.get_webview_window("main") {
         // 先显示以便窗口管理器提交最终尺寸，随后再计算跨屏物理位置。
@@ -414,8 +414,8 @@ pub(crate) fn show_main_window(app: &AppHandle) {
                 let size = window.outer_size().ok()?;
                 let x = origin.x
                     + (i64::from(monitor_size.width) - i64::from(size.width)).max(0) as i32 / 2;
-                let y = origin.y
-                    + (i64::from(monitor_size.height) - i64::from(size.height)).max(0) as i32 / 2;
+                // 原版启动器固定在屏幕上方区域，窗口向下展开时仍完整留在当前显示器内。
+                let y = origin.y + i64::from(monitor_size.height).max(0) as i32 / 6;
                 window.set_position(PhysicalPosition::new(x, y)).ok()
             })
             .is_some();

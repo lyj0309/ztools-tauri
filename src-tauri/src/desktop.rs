@@ -1,4 +1,5 @@
 use std::{
+    borrow::Cow,
     fs,
     path::PathBuf,
     process::Command,
@@ -46,6 +47,24 @@ pub(crate) fn write_clipboard_text(content: String) -> Result<(), String> {
         .as_mut()
         .ok_or_else(|| "系统剪贴板不可用".to_owned())?
         .set_text(content)
+        .map_err(|error| error.to_string())
+}
+
+/// 解码 PNG 并把 RGBA 像素写入系统图片剪贴板。
+pub(crate) fn write_clipboard_image_png(data: &[u8]) -> Result<(), String> {
+    let image = image::load_from_memory_with_format(data, image::ImageFormat::Png)
+        .map_err(|error| format!("截图 PNG 无效：{error}"))?
+        .into_rgba8();
+    let (width, height) = image.dimensions();
+    let mut clipboard = system_clipboard()?;
+    clipboard
+        .as_mut()
+        .ok_or_else(|| "系统剪贴板不可用".to_owned())?
+        .set_image(arboard::ImageData {
+            width: width as usize,
+            height: height as usize,
+            bytes: Cow::Owned(image.into_raw()),
+        })
         .map_err(|error| error.to_string())
 }
 
@@ -113,12 +132,18 @@ pub(crate) fn capture_screen(app: &AppHandle) -> Result<PathBuf, String> {
         .unwrap_or_default();
     let output = directory.join(format!("ZTools-Screenshot-{timestamp}.png"));
 
+    capture_screen_to(app, &output)?;
+    Ok(output)
+}
+
+/// 把鼠标所在显示器截取到宿主生成的目标路径。
+pub(crate) fn capture_screen_to(app: &AppHandle, output: &PathBuf) -> Result<(), String> {
     // 平台实现只接收宿主生成的输出路径，不拼接用户输入或交给 shell 解析。
-    capture_screen_platform(app, &output)?;
-    if !output.is_file() || fs::metadata(&output).map_or(0, |metadata| metadata.len()) == 0 {
+    capture_screen_platform(app, output)?;
+    if !output.is_file() || fs::metadata(output).map_or(0, |metadata| metadata.len()) == 0 {
         return Err("截图工具没有生成有效图片".to_owned());
     }
-    Ok(output)
+    Ok(())
 }
 
 #[cfg(target_os = "linux")]
@@ -182,9 +207,9 @@ fn capture_screen_platform(_app: &AppHandle, output: &PathBuf) -> Result<(), Str
 }
 
 #[cfg(target_os = "windows")]
-/// 使用 Windows 系统程序集截取整个虚拟桌面并保存 PNG。
+/// 使用 Windows 系统程序集截取鼠标所在显示器并保存 PNG。
 fn capture_screen_platform(_app: &AppHandle, output: &PathBuf) -> Result<(), String> {
-    const SCRIPT: &str = "Add-Type -AssemblyName System.Windows.Forms; Add-Type -AssemblyName System.Drawing; $b=[System.Windows.Forms.SystemInformation]::VirtualScreen; $i=New-Object System.Drawing.Bitmap $b.Width,$b.Height; $g=[System.Drawing.Graphics]::FromImage($i); $g.CopyFromScreen($b.Location,[System.Drawing.Point]::Empty,$b.Size); $i.Save($args[0],[System.Drawing.Imaging.ImageFormat]::Png); $g.Dispose(); $i.Dispose()";
+    const SCRIPT: &str = "Add-Type -AssemblyName System.Windows.Forms; Add-Type -AssemblyName System.Drawing; $b=[System.Windows.Forms.Screen]::FromPoint([System.Windows.Forms.Cursor]::Position).Bounds; $i=New-Object System.Drawing.Bitmap $b.Width,$b.Height; $g=[System.Drawing.Graphics]::FromImage($i); $g.CopyFromScreen($b.Location,[System.Drawing.Point]::Empty,$b.Size); $i.Save($args[0],[System.Drawing.Imaging.ImageFormat]::Png); $g.Dispose(); $i.Dispose()";
     command_result(
         Command::new("powershell")
             .args(["-NoProfile", "-NonInteractive", "-Command", SCRIPT])

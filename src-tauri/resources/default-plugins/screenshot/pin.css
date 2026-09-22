@@ -1,0 +1,102 @@
+:root {
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Microsoft YaHei", sans-serif;
+  color: #ffffff;
+  background: #111214;
+  font-synthesis: none;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+[hidden] {
+  display: none !important;
+}
+
+html,
+body,
+#screenshot-pin {
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  overflow: hidden;
+  user-select: none;
+}
+
+#screenshot-pin {
+  position: relative;
+  background: #111214;
+  border: 1px solid rgba(255, 255, 255, 0.2);
+}
+
+.pin-image {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  pointer-events: none;
+}
+
+.pin-controls {
+  position: absolute;
+  top: 7px;
+  right: 7px;
+  display: flex;
+  gap: 3px;
+  padding: 4px;
+  background: rgba(24, 25, 27, 0.9);
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  border-radius: 7px;
+  box-shadow: 0 5px 18px rgba(0, 0, 0, 0.34);
+  opacity: 0;
+  transition: opacity 120ms ease;
+}
+
+#screenshot-pin:hover .pin-controls,
+.pin-controls:focus-within {
+  opacity: 1;
+}
+
+.pin-controls.busy {
+  pointer-events: none;
+  opacity: 0.55;
+}
+
+.pin-controls button {
+  min-width: 34px;
+  height: 28px;
+  padding: 0 7px;
+  color: #eef1f3;
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+  background: transparent;
+  border: 0;
+  border-radius: 4px;
+}
+
+.pin-controls button:hover {
+  background: rgba(255, 255, 255, 0.13);
+}
+
+.pin-message {
+  position: absolute;
+  bottom: 12px;
+  left: 50%;
+  max-width: calc(100% - 24px);
+  padding: 7px 10px;
+  overflow: hidden;
+  color: #b8f5de;
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  background: rgba(24, 25, 27, 0.9);
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  border-radius: 6px;
+  transform: translateX(-50%);
+  pointer-events: none;
+}
+
+.pin-message.error {
+  color: #ffd2d2;
+}

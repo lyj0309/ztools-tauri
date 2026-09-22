@@ -6,6 +6,7 @@ mod legacy;
 mod legacy_lmdb_v2;
 mod models;
 mod plugin;
+mod screenshot;
 mod services;
 mod state;
 mod storage;
@@ -73,6 +74,17 @@ pub fn run() {
             commands::system::get_sync_status,
             commands::system::send_test_notification,
             commands::system::capture_screen,
+            screenshot::screenshot_editor_source,
+            screenshot::screenshot_editor_info,
+            screenshot::screenshot_save,
+            screenshot::screenshot_copy,
+            screenshot::screenshot_pin,
+            screenshot::screenshot_cancel,
+            screenshot::screenshot_pin_source,
+            screenshot::screenshot_pin_start_dragging,
+            screenshot::screenshot_pin_copy,
+            screenshot::screenshot_pin_save,
+            screenshot::screenshot_pin_close,
             commands::system::check_for_updates,
             commands::system::install_update,
             commands::system::open_external_url,
@@ -139,6 +151,7 @@ pub fn run() {
             let store = Store::open(&database_path).map_err(io::Error::other)?;
             let settings = store.settings().map_err(io::Error::other)?;
             app.manage(AppState::new(store));
+            app.manage(screenshot::ScreenshotRuntime::new());
             let plugin_runtime =
                 plugin::PluginRuntime::new(plugin_root.clone()).map_err(io::Error::other)?;
             // 用户首次启动或升级后先发布随包默认插件，再开放前端插件列表查询。
@@ -183,6 +196,8 @@ pub fn run() {
             tray.build(app)?;
 
             if let Some(window) = app.get_webview_window("main") {
+                #[cfg(target_os = "linux")]
+                configure_linux_launcher_minimum_height(&window);
                 // 关闭按钮与失焦行为只隐藏常驻启动器，显式退出由托盘负责。
                 let app_handle = app.handle().clone();
                 window.on_window_event(move |event| match event {
@@ -227,11 +242,26 @@ pub fn run() {
     // 退出事件循环前显式停止并回收所有后台线程。
     application.run(|app, event| {
         if matches!(event, RunEvent::Exit) {
+            app.state::<screenshot::ScreenshotRuntime>().cleanup();
             app.state::<plugin::PluginRuntime>()
                 .stop_all_development_watches();
             app.state::<services::BackgroundServices>().stop();
         }
     });
+}
+
+/// 降低 WebKitGTK 子控件的默认高度请求，使 Linux 启动器能收起到原版 61 像素。
+#[cfg(target_os = "linux")]
+fn configure_linux_launcher_minimum_height(window: &tauri::WebviewWindow) {
+    use gtk::prelude::{ContainerExt, WidgetExt};
+
+    // WebKitGTK 默认请求 200 像素高度；覆盖子控件请求后仍由窗口约束保证宽度。
+    if let Ok(container) = window.default_vbox() {
+        container.set_size_request(-1, 1);
+        for child in container.children() {
+            child.set_size_request(-1, 1);
+        }
+    }
 }
 
 /// 在显式隔离测试模式下按环境变量启动插件，供真实 Webview E2E 绕过桌面拖放驱动限制。
@@ -247,6 +277,20 @@ fn launch_e2e_plugin(app: &tauri::AppHandle) -> Result<(), Box<dyn std::error::E
         .and_then(|value| serde_json::from_str(&value).ok())
         .unwrap_or(serde_json::Value::Null);
     eprintln!("[e2e] launching plugin {plugin_name}:{feature_code}");
+    if plugin_name == "screenshot" && feature_code == "capture" {
+        let screenshot_app = app.clone();
+        let main = app
+            .get_webview_window("main")
+            .ok_or_else(|| io::Error::other("main window is unavailable"))?;
+        // 截图默认插件需要先执行异步抓屏，再创建其专用全屏编辑窗口。
+        tauri::async_runtime::spawn(async move {
+            match screenshot::start_editor(screenshot_app, main).await {
+                Ok(()) => eprintln!("[e2e] screenshot plugin launch completed"),
+                Err(error) => eprintln!("[e2e] screenshot plugin launch failed: {error}"),
+            }
+        });
+        return Ok(());
+    }
     let runtime = app.state::<plugin::PluginRuntime>();
     if let Some(source) = std::env::var_os("ZTOOLS_E2E_PLUGIN_DEV_SOURCE") {
         runtime

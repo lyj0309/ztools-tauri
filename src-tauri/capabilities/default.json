@@ -3,5 +3,5 @@
   "identifier": "main-capability",
   "description": "Base capability for the ZTools main window",
   "windows": ["main"],
-  "permissions": ["core:default", "main-commands"]
+  "permissions": ["core:default", "core:window:allow-set-size", "main-commands"]
 }

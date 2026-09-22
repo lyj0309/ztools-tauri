@@ -13,6 +13,8 @@
 | `src-tauri/src/backup.rs` | SQLite 在线快照、插件归档、完整性校验和恢复回滚 |
 | `src-tauri/src/legacy*.rs` | LMDB v1/v2 只读解析与一次性数据转换 |
 | `src-tauri/src/desktop.rs` | 剪贴板、输入模拟、截图、文件和外部地址 |
+| `src-tauri/src/screenshot.rs` | 截图会话、图片剪贴板、保存和置顶贴图窗口 |
+| `src-tauri/resources/default-plugins/screenshot` | 选区、标注和贴图的无 Node 插件界面 |
 | `src-tauri/src/sync.rs` | 共享文件双向合并和原子发布 |
 | `src-tauri/src/services.rs` | 可取消的剪贴板、同步和应用扫描线程 |
 | `src-tauri/src/commands` | 参数校验、系统操作和前端可见错误 |

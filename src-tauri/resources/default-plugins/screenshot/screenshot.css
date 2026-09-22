@@ -1,0 +1,142 @@
+:root {
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Microsoft YaHei", sans-serif;
+  color: #ffffff;
+  background: #000000;
+  font-synthesis: none;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+[hidden] {
+  display: none !important;
+}
+
+html,
+body,
+#screenshot-editor {
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  overflow: hidden;
+  user-select: none;
+}
+
+.capture-canvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+  cursor: crosshair;
+  touch-action: none;
+}
+
+.capture-guide,
+.capture-size,
+.capture-message {
+  position: fixed;
+  z-index: 3;
+  padding: 7px 11px;
+  color: #ffffff;
+  font-size: 12px;
+  background: rgba(24, 25, 27, 0.88);
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  border-radius: 6px;
+  box-shadow: 0 5px 18px rgba(0, 0, 0, 0.28);
+  pointer-events: none;
+}
+
+.capture-guide {
+  top: 22px;
+  left: 50%;
+  transform: translateX(-50%);
+}
+
+.capture-size {
+  font-variant-numeric: tabular-nums;
+}
+
+.capture-message {
+  top: 22px;
+  left: 50%;
+  color: #b8f5de;
+  transform: translateX(-50%);
+}
+
+.capture-message.error {
+  color: #ffd2d2;
+}
+
+.capture-toolbar {
+  position: fixed;
+  z-index: 4;
+  display: flex;
+  min-height: 42px;
+  align-items: center;
+  gap: 4px;
+  padding: 5px;
+  color: #eceff1;
+  background: rgba(31, 32, 35, 0.96);
+  border: 1px solid rgba(255, 255, 255, 0.13);
+  border-radius: 8px;
+  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.4);
+  max-width: calc(100vw - 16px);
+  flex-wrap: wrap;
+}
+
+.capture-toolbar.busy {
+  opacity: 0.62;
+  pointer-events: none;
+}
+
+.capture-toolbar button {
+  min-width: 38px;
+  height: 31px;
+  padding: 0 8px;
+  color: inherit;
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+  background: transparent;
+  border: 0;
+  border-radius: 5px;
+}
+
+.capture-toolbar button:hover,
+.capture-toolbar button.active {
+  background: rgba(255, 255, 255, 0.12);
+}
+
+.capture-toolbar button.primary {
+  color: #ffffff;
+  background: #059669;
+}
+
+.capture-toolbar button.color {
+  min-width: 22px;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  background: #ff3b30;
+  border: 2px solid transparent;
+  border-radius: 50%;
+}
+
+.capture-toolbar button.color.yellow {
+  background: #ffd60a;
+}
+
+.capture-toolbar button.color.green {
+  background: #20c997;
+}
+
+.capture-toolbar button.color.active {
+  border-color: #ffffff;
+}
+
+.capture-divider {
+  width: 1px;
+  height: 24px;
+  margin: 0 2px;
+  background: rgba(255, 255, 255, 0.16);
+}

@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "screenshot-capability",
+  "description": "Restricted capability for screenshot editor and floating image windows",
+  "windows": ["plugin-screenshot", "plugin-screenshot-pin-*"],
+  "permissions": ["core:event:default", "screenshot-commands"]
+}

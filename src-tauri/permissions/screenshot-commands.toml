@@ -1,0 +1,16 @@
+[[permission]]
+identifier = "screenshot-commands"
+description = "Allows screenshot editor and pin windows to access only their temporary image session."
+commands.allow = [
+  "screenshot_editor_source",
+  "screenshot_editor_info",
+  "screenshot_save",
+  "screenshot_copy",
+  "screenshot_pin",
+  "screenshot_cancel",
+  "screenshot_pin_source",
+  "screenshot_pin_start_dragging",
+  "screenshot_pin_copy",
+  "screenshot_pin_save",
+  "screenshot_pin_close"
+]

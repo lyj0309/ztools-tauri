@@ -69,7 +69,7 @@ impl Default for LauncherSettings {
             hide_on_blur: false,
             max_results: 12,
             theme: "system".to_owned(),
-            accent_color: "#7c6cf2".to_owned(),
+            accent_color: "#059669".to_owned(),
             show_recent: true,
             clipboard_monitoring: true,
             auto_paste: false,

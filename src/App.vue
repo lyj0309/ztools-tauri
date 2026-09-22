@@ -1,14 +1,15 @@
 <script setup lang="ts">
 import { getCurrentWebviewWindow } from '@tauri-apps/api/webviewWindow'
+import { LogicalSize } from '@tauri-apps/api/dpi'
 import { listen, type UnlistenFn } from '@tauri-apps/api/event'
 import { pinyin } from 'pinyin-pro'
-import { computed, nextTick, onMounted, onUnmounted, ref } from 'vue'
+import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
+import ztoolsLogo from '../icons/icon.png'
 import {
   addLocalShortcut,
   bootstrapLauncher,
   cancelPluginMarketInstall,
   captureClipboard,
-  captureScreen,
   checkForUpdates,
   clearClipboardHistory,
   clearLaunchHistory,
@@ -75,6 +76,8 @@ let unlistenPluginFeatures: UnlistenFn | undefined
 let unlistenMarketProgress: UnlistenFn | undefined
 let unlistenPluginDevelopment: UnlistenFn | undefined
 let unlistenOpenSettings: UnlistenFn | undefined
+let unlistenScreenshotFinished: UnlistenFn | undefined
+let settingsSaveTimer: ReturnType<typeof setTimeout> | undefined
 const serviceBusy = ref('')
 const serviceMessage = ref('')
 const updateInfo = ref<UpdateInfo | null>(null)
@@ -100,7 +103,7 @@ const snapshot = ref<LauncherSnapshot>({
     hideOnBlur: false,
     maxResults: 12,
     theme: 'system',
-    accentColor: '#7c6cf2',
+    accentColor: '#059669',
     showRecent: true,
     clipboardMonitoring: true,
     autoPaste: false,
@@ -392,11 +395,37 @@ function pluginFeatureCode(plugin: InstalledPlugin, rawQuery: string): string {
 }
 
 const searchPlaceholder = computed(() => {
-  if (activeMode.value === 'clipboard') return '搜索剪贴板历史'
   if (activeMode.value === 'files') return '筛选已拖入文件'
-  if (activeMode.value === 'plugins') return '搜索插件或功能'
-  return '搜索应用'
+  return '搜索应用和指令 / 粘贴文件或图片'
 })
+
+const hasLauncherContent = computed(
+  () =>
+    Boolean(query.value.trim() || errorMessage.value) ||
+    (activeMode.value === 'files' && droppedPaths.value.length > 0)
+)
+
+/**
+ * 按原版 ZTools 的固定宽度和内容高度调整主窗口。
+ * @returns 窗口尺寸更新完成后的 Promise。
+ */
+async function resizeLauncherWindow(): Promise<void> {
+  // 设置插件始终使用原版 800×600 工作区；空搜索只保留 61 像素顶部栏。
+  let height = 61
+  if (settingsOpen.value) {
+    height = 600
+  } else if (hasLauncherContent.value) {
+    await nextTick()
+    const contentHeight = document.querySelector<HTMLElement>('.launcher-content')?.scrollHeight ?? 0
+    height = Math.min(Math.max(61 + contentHeight, 145), 600)
+  }
+  try {
+    // 开发热更新期间窗口可能正在销毁，尺寸同步失败不应中断界面渲染。
+    await getCurrentWebviewWindow().setSize(new LogicalSize(800, height))
+  } catch (error) {
+    console.warn('同步启动器窗口尺寸失败', error)
+  }
+}
 
 /**
  * 计算应用对当前查询的排序得分，并融入收藏和最近使用权重。
@@ -518,7 +547,7 @@ async function togglePinned(app: AppEntry): Promise<void> {
 }
 
 /**
- * 保存设置并采用宿主返回的最终配置。
+ * 自动保存设置并采用宿主返回的最终配置，保持原版设置页的即时生效行为。
  * @returns 设置保存完成后的 Promise。
  */
 async function saveSettings(): Promise<void> {
@@ -526,11 +555,23 @@ async function saveSettings(): Promise<void> {
   try {
     const saved = await updateLauncherSettings(settingsDraft.value)
     snapshot.value.settings = saved
-    settingsOpen.value = false
-    await focusSearch()
   } catch (error) {
     errorMessage.value = String(error)
   }
+}
+
+/**
+ * 合并连续表单输入，停止编辑后再提交一次完整设置。
+ * @returns 无返回值。
+ */
+function scheduleSettingsSave(): void {
+  if (!settingsOpen.value) return
+  // 文本输入会连续触发更新，延迟提交可避免频繁写库和重复注册快捷键。
+  if (settingsSaveTimer) clearTimeout(settingsSaveTimer)
+  settingsSaveTimer = setTimeout(() => {
+    settingsSaveTimer = undefined
+    void saveSettings()
+  }, 300)
 }
 
 /**
@@ -1088,15 +1129,15 @@ async function testNotification(): Promise<void> {
 }
 
 /**
- * 调用 Rust 屏幕捕获并展示保存位置。
- * @returns 截图请求完成后的 Promise。
+ * 打开原生全屏选区截图与标注编辑器。
+ * @returns 编辑器窗口创建完成后的 Promise。
  */
 async function runScreenCapture(): Promise<void> {
   serviceBusy.value = 'screenshot'
   serviceMessage.value = ''
   try {
-    const path = await captureScreen()
-    serviceMessage.value = `截图已保存：${path}`
+    await launchPluginFeature('screenshot', 'capture', null)
+    serviceMessage.value = '请选择截图区域，可标注后复制、保存或贴图'
   } catch (error) {
     serviceMessage.value = String(error)
   } finally {
@@ -1172,10 +1213,21 @@ async function registerServiceEvents(): Promise<void> {
     // Rust 已校验分页标识，前端只负责切换现有设置界面。
     void openSettingsSection(event.payload)
   })
+  unlistenScreenshotFinished = await listen<{ action: string; path?: string | null }>(
+    'screenshot-finished',
+    (event) => {
+      // 编辑器结束后在设置页显示最终动作，便于确认复制、保存或贴图结果。
+      const { action, path } = event.payload
+      if (action === 'saved') serviceMessage.value = `截图已保存：${path ?? ''}`
+      else if (action === 'copied') serviceMessage.value = '截图已复制到剪贴板'
+      else if (action === 'pinned') serviceMessage.value = '截图已创建为悬浮贴图'
+      else serviceMessage.value = '已取消截图'
+    }
+  )
 }
 
 /**
- * 根据键盘输入移动选择、启动应用或关闭窗口。
+ * 根据键盘输入按原版九列网格移动选择、启动结果或关闭窗口。
  * @param event 搜索框键盘事件。
  * @returns 无返回值。
  */
@@ -1188,12 +1240,21 @@ function handleKeyboard(event: KeyboardEvent): void {
       : activeMode.value === 'clipboard'
         ? visibleClipboard.value.length
         : filePluginActions.value.length + visibleDroppedPaths.value.length
+  const gridStep = activeMode.value === 'apps' ? 9 : 1
   if (event.key === 'ArrowDown') {
     event.preventDefault()
-    selectedIndex.value = Math.min(selectedIndex.value + 1, Math.max(resultCount - 1, 0))
+    selectedIndex.value = Math.min(selectedIndex.value + gridStep, Math.max(resultCount - 1, 0))
   } else if (event.key === 'ArrowUp') {
     event.preventDefault()
-    selectedIndex.value = Math.max(selectedIndex.value - 1, 0)
+    selectedIndex.value = Math.max(selectedIndex.value - gridStep, 0)
+  } else if (event.key === 'ArrowRight' || event.key === 'Tab') {
+    event.preventDefault()
+    selectedIndex.value = resultCount ? (selectedIndex.value + 1) % resultCount : 0
+  } else if (event.key === 'ArrowLeft') {
+    event.preventDefault()
+    selectedIndex.value = resultCount
+      ? (selectedIndex.value - 1 + resultCount) % resultCount
+      : 0
   } else if (event.key === 'Enter') {
     if (activeMode.value === 'apps') {
       const result = visibleLauncherResults.value[selectedIndex.value]
@@ -1321,7 +1382,27 @@ async function registerDragAndDrop(): Promise<void> {
   })
 }
 
+watch(
+  [
+    query,
+    settingsOpen,
+    activeMode,
+    loading,
+    errorMessage,
+    () => visibleLauncherResults.value.length,
+    () => droppedPaths.value.length
+  ],
+  () => {
+    void resizeLauncherWindow()
+  },
+  { flush: 'post' }
+)
+
+watch(settingsDraft, scheduleSettingsSave, { deep: true, flush: 'sync' })
+
 onMounted(() => {
+  // 首帧先恢复原版单行启动器尺寸，再异步加载内容。
+  void resizeLauncherWindow()
   void loadLauncher()
   void registerDragAndDrop()
   void registerServiceEvents()
@@ -1329,7 +1410,7 @@ onMounted(() => {
 })
 
 onUnmounted(() => {
-  // 页面销毁时释放原生事件订阅与浏览器焦点监听。
+  // 页面销毁时释放原生事件订阅、待提交设置和浏览器焦点监听。
   unlistenDragDrop?.()
   unlistenClipboard?.()
   unlistenSync?.()
@@ -1338,6 +1419,8 @@ onUnmounted(() => {
   unlistenMarketProgress?.()
   unlistenPluginDevelopment?.()
   unlistenOpenSettings?.()
+  unlistenScreenshotFinished?.()
+  if (settingsSaveTimer) clearTimeout(settingsSaveTimer)
   window.removeEventListener('focus', handleWindowFocus)
 })
 </script>
@@ -1350,9 +1433,7 @@ onUnmounted(() => {
     @keydown="handleKeyboard"
   >
     <section class="search-panel">
-      <div class="brand-mark">Z</div>
       <div class="search-field">
-        <span class="search-icon" aria-hidden="true">⌕</span>
         <input
           ref="searchInput"
           v-model="query"
@@ -1363,32 +1444,16 @@ onUnmounted(() => {
           :aria-label="searchPlaceholder"
           @input="selectedIndex = 0"
         />
-        <button v-if="query" class="icon-button" title="清空搜索" @click="clearQuery">×</button>
       </div>
-      <button class="toolbar-button" title="重新扫描应用" :disabled="refreshing" @click="refresh">
-        <span :class="{ spinning: refreshing }">↻</span>
+      <span v-if="query" class="tab-hint">切换选中 <kbd>Tab</kbd></span>
+      <button class="profile-button" title="设置" @click="openSettings">
+        <img :src="ztoolsLogo" alt="ZTools" />
       </button>
-      <button class="toolbar-button" title="设置" @click="openSettings">⚙</button>
     </section>
 
-    <nav class="mode-tabs" aria-label="结果类别">
-      <button :class="{ active: activeMode === 'apps' }" @click="selectMode('apps')">
-        应用 <span>{{ snapshot.apps.length }}</span>
-      </button>
-      <button :class="{ active: activeMode === 'plugins' }" @click="selectMode('plugins')">
-        插件 <span>{{ plugins.length }}</span>
-      </button>
-      <button :class="{ active: activeMode === 'clipboard' }" @click="selectMode('clipboard')">
-        剪贴板 <span>{{ snapshot.clipboard.length }}</span>
-      </button>
-      <button :class="{ active: activeMode === 'files' }" @click="selectMode('files')">
-        文件 <span>{{ droppedPaths.length }}</span>
-      </button>
-    </nav>
-
-    <p v-if="errorMessage" class="error-banner">{{ errorMessage }}</p>
-
-    <section class="results-panel" aria-live="polite">
+    <section v-if="hasLauncherContent" class="launcher-content" aria-live="polite">
+      <p v-if="errorMessage" class="error-banner">{{ errorMessage }}</p>
+      <div class="results-panel">
       <div v-if="loading" class="empty-state">
         <span class="loader"></span>
         <p>正在读取系统应用…</p>
@@ -1398,21 +1463,17 @@ onUnmounted(() => {
         <p>换一个名称、命令或路径关键字试试</p>
       </div>
       <template v-else-if="activeMode === 'apps'">
-        <div class="section-caption">
-          <span>{{ query ? `“${query}” 的结果` : '应用' }}</span>
-          <span>{{ visibleLauncherResults.length }} 项</span>
-        </div>
+        <div class="section-caption">最佳搜索结果</div>
         <button
           v-for="(result, index) in visibleLauncherResults"
           :key="result.key"
           class="result-row"
           :class="{ 'plugin-row': result.kind === 'plugin', selected: index === selectedIndex }"
           @mouseenter="selectedIndex = index"
-          @dblclick="launchUnifiedResult(result)"
-          @click="selectedIndex = index"
+          @click="selectedIndex = index; launchUnifiedResult(result)"
         >
           <template v-if="result.kind === 'app'">
-            <span class="app-icon">{{ result.app.name.slice(0, 1).toLocaleUpperCase() }}</span>
+            <span class="app-icon app-icon-placeholder">{{ result.app.name.slice(0, 1).toLocaleUpperCase() }}</span>
             <span class="app-copy">
               <strong>{{ result.app.name }}</strong>
               <small>{{ appSubtitle(result.app) }}</small>
@@ -1434,9 +1495,10 @@ onUnmounted(() => {
             >
           </template>
           <template v-else-if="result.kind === 'plugin'">
-            <span class="app-icon plugin-icon">{{
-              result.plugin.title.slice(0, 1).toLocaleUpperCase()
-            }}</span>
+            <span class="app-icon plugin-icon">
+              <img v-if="result.plugin.logoUrl" :src="result.plugin.logoUrl" alt="" />
+              <template v-else>{{ result.plugin.title.slice(0, 1).toLocaleUpperCase() }}</template>
+            </span>
             <span class="app-copy">
               <strong>{{ result.plugin.title }}</strong>
               <small>{{ result.explain }} · {{ result.featureCode }}</small>
@@ -1574,14 +1636,8 @@ onUnmounted(() => {
           <kbd v-if="index + filePluginActions.length === selectedIndex">打开</kbd>
         </button>
       </template>
+      </div>
     </section>
-
-    <footer>
-      <span><kbd>↑</kbd><kbd>↓</kbd> 选择</span>
-      <span><kbd>Enter</kbd> 启动</span>
-      <span><kbd>Esc</kbd> 隐藏</span>
-      <span class="shortcut-label">{{ snapshot.settings.shortcut }}</span>
-    </footer>
 
     <div v-if="dragActive" class="drop-overlay">
       <strong>松开以添加文件</strong>
@@ -1590,11 +1646,14 @@ onUnmounted(() => {
     <div v-if="settingsOpen" class="modal-backdrop" @click.self="settingsOpen = false">
       <form class="settings-card" @submit.prevent="saveSettings">
         <header>
-          <div>
-            <h2>ZTools 设置</h2>
-            <p>配置由 Rust 宿主保存并即时应用</p>
+          <div class="settings-plugin-tabs">
+            <span class="settings-plugin-home"><b><img :src="ztoolsLogo" alt="" /></b> 设置</span>
+            <span class="settings-plugin-page">设置 <button type="button" @click="settingsOpen = false">×</button></span>
           </div>
-          <button type="button" class="icon-button" @click="settingsOpen = false">×</button>
+          <span class="settings-more" aria-hidden="true">⋮</span>
+          <button type="button" class="profile-button" title="返回搜索" @click="settingsOpen = false">
+            <img :src="ztoolsLogo" alt="ZTools" />
+          </button>
         </header>
 
         <nav class="settings-tabs" aria-label="设置类别">
@@ -1602,41 +1661,42 @@ onUnmounted(() => {
             type="button"
             :class="{ active: settingsSection === 'general' }"
             @click="settingsSection = 'general'"
-            >通用</button
+            ><span>⚙</span>通用设置</button
           >
           <button
             type="button"
             :class="{ active: settingsSection === 'appearance' }"
             @click="settingsSection = 'appearance'"
-            >外观</button
+            ><span>◈</span>外观设置</button
           >
           <button
             type="button"
             :class="{ active: settingsSection === 'data' }"
             @click="settingsSection = 'data'"
-            >数据</button
+            ><span>▤</span>我的数据</button
           >
           <button
             type="button"
             :class="{ active: settingsSection === 'plugins' }"
             @click="settingsSection = 'plugins'"
-            >插件</button
+            ><span>⌘</span>已安装插件</button
           >
           <button
             type="button"
             :class="{ active: settingsSection === 'market' }"
             @click="loadPluginMarket"
-            >市场</button
+            ><span>▣</span>插件市场</button
           >
           <button
             type="button"
             :class="{ active: settingsSection === 'services' }"
             @click="settingsSection = 'services'"
-            >服务</button
+            ><span>☁</span>数据同步</button
           >
         </nav>
 
         <section v-if="settingsSection === 'general'" class="settings-body">
+          <h3 class="settings-section-title">基础</h3>
           <label class="field-row">
             <span>全局快捷键</span>
             <input v-model.trim="settingsDraft.shortcut" placeholder="Alt+Z" />
@@ -1656,6 +1716,7 @@ onUnmounted(() => {
         </section>
 
         <section v-else-if="settingsSection === 'appearance'" class="settings-body">
+          <h3 class="settings-section-title">外观</h3>
           <label class="field-row">
             <span>主题</span>
             <select v-model="settingsDraft.theme">
@@ -1675,6 +1736,7 @@ onUnmounted(() => {
         </section>
 
         <section v-else-if="settingsSection === 'data'" class="settings-body">
+          <h3 class="settings-section-title">我的数据</h3>
           <label class="switch-row">
             <span><strong>持续记录剪贴板</strong><small>Rust 后台仅保存纯文本，最多 2 MB</small></span>
             <input v-model="settingsDraft.clipboardMonitoring" type="checkbox" />
@@ -1757,6 +1819,7 @@ onUnmounted(() => {
         </section>
 
         <section v-else-if="settingsSection === 'plugins'" class="settings-body">
+          <h3 class="settings-section-title">已安装插件</h3>
           <div class="settings-subtitle">本地插件</div>
           <label class="field-row field-row-wide">
             <span>插件目录</span>
@@ -1839,6 +1902,7 @@ onUnmounted(() => {
         </section>
 
         <section v-else-if="settingsSection === 'market'" class="settings-body">
+          <h3 class="settings-section-title">插件市场</h3>
           <div class="market-filters">
             <label class="field-row field-row-wide">
               <span>搜索市场</span>
@@ -1907,6 +1971,7 @@ onUnmounted(() => {
         </section>
 
         <section v-else class="settings-body">
+          <h3 class="settings-section-title">数据同步</h3>
           <label class="switch-row">
             <span><strong>共享目录同步</strong><small>可放在 NAS、Syncthing 或网盘目录</small></span>
             <input v-model="settingsDraft.syncEnabled" type="checkbox" />
@@ -1975,23 +2040,17 @@ onUnmounted(() => {
             >
           </div>
           <div class="service-row">
-            <span><strong>屏幕截图</strong><small>隐藏启动器后截取鼠标所在显示器并保存 PNG</small></span>
+            <span><strong>截图与贴图</strong><small>选区截图后可标注、复制、保存或创建悬浮贴图</small></span>
             <button
               type="button"
               :disabled="serviceBusy === 'screenshot'"
               @click="runScreenCapture"
-              >{{ serviceBusy === 'screenshot' ? '截图中…' : '立即截图' }}</button
+              >{{ serviceBusy === 'screenshot' ? '启动中…' : '开始截图' }}</button
             >
           </div>
           <p v-if="serviceMessage" class="service-message">{{ serviceMessage }}</p>
         </section>
 
-        <div class="settings-actions">
-          <button type="button" class="danger-button" @click="clearHistory">清空历史</button>
-          <span></span>
-          <button type="button" class="secondary-button" @click="settingsOpen = false">取消</button>
-          <button type="submit" class="primary-button">保存</button>
-        </div>
       </form>
     </div>
   </main>

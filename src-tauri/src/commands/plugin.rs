@@ -192,6 +192,17 @@ pub(crate) async fn launch_plugin_feature(
         crate::commands::launcher::show_main_window(&app);
         return Ok(());
     }
+    if plugin_name == "screenshot" {
+        if feature_code != "capture" {
+            return Err("未知的截图插件功能".to_owned());
+        }
+        let main = app
+            .get_webview_window("main")
+            .ok_or_else(|| "主启动器窗口不存在".to_owned())?;
+        // 默认截图插件由宿主先隐藏启动器并抓取屏幕，再加载插件自带编辑界面。
+        crate::screenshot::start_editor(app.clone(), main).await?;
+        return Ok(());
+    }
     if plugin_name == "system" {
         // 系统插件只转发 manifest 中声明的固定命令，由 Rust 白名单完成最终校验。
         crate::commands::system::run_system_command(feature_code, app.clone())?;
