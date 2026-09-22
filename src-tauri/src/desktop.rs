@@ -209,11 +209,12 @@ fn capture_screen_platform(_app: &AppHandle, output: &PathBuf) -> Result<(), Str
 #[cfg(target_os = "windows")]
 /// 使用 Windows 系统程序集截取鼠标所在显示器并保存 PNG。
 fn capture_screen_platform(_app: &AppHandle, output: &PathBuf) -> Result<(), String> {
-    const SCRIPT: &str = "Add-Type -AssemblyName System.Windows.Forms; Add-Type -AssemblyName System.Drawing; $b=[System.Windows.Forms.Screen]::FromPoint([System.Windows.Forms.Cursor]::Position).Bounds; $i=New-Object System.Drawing.Bitmap $b.Width,$b.Height; $g=[System.Drawing.Graphics]::FromImage($i); $g.CopyFromScreen($b.Location,[System.Drawing.Point]::Empty,$b.Size); $i.Save($args[0],[System.Drawing.Imaging.ImageFormat]::Png); $g.Dispose(); $i.Dispose()";
+    const SCRIPT: &str = "Add-Type -AssemblyName System.Windows.Forms; Add-Type -AssemblyName System.Drawing; $o=[Environment]::GetEnvironmentVariable('ZTOOLS_SCREENSHOT_OUTPUT'); $b=[System.Windows.Forms.Screen]::FromPoint([System.Windows.Forms.Cursor]::Position).Bounds; $i=New-Object System.Drawing.Bitmap $b.Width,$b.Height; $g=[System.Drawing.Graphics]::FromImage($i); $g.CopyFromScreen($b.Location,[System.Drawing.Point]::Empty,$b.Size); $i.Save($o,[System.Drawing.Imaging.ImageFormat]::Png); $g.Dispose(); $i.Dispose()";
     command_result(
         Command::new("powershell")
+            // 通过子进程环境传入路径，避免 -Command 把 Windows 路径继续解析为脚本源码。
+            .env("ZTOOLS_SCREENSHOT_OUTPUT", output)
             .args(["-NoProfile", "-NonInteractive", "-Command", SCRIPT])
-            .arg(output)
             .status(),
     )
 }
