@@ -241,7 +241,7 @@ fn create_e2e_native_pin(app: &AppHandle, editor: &WebviewWindow) -> Result<(), 
     let data = output.into_inner();
     let pin_app = app.clone();
     let pin_editor = editor.clone();
-    app.run_on_main_thread(move || {
+    tauri::async_runtime::spawn(async move {
         let result = screenshot_pin(
             data,
             f64::from(x),
@@ -252,8 +252,8 @@ fn create_e2e_native_pin(app: &AppHandle, editor: &WebviewWindow) -> Result<(), 
             pin_editor,
         );
         eprintln!("[e2e] screenshot native pin result: {result:?}");
-    })
-    .map_err(|error| error.to_string())
+    });
+    Ok(())
 }
 
 /// 返回当前编辑器源 PNG 的原始字节。
