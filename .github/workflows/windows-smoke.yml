@@ -262,8 +262,12 @@ jobs:
             Start-Sleep -Seconds 1
             Save-DesktopScreenshot -Path 'artifacts/03-selection.png'
 
-            [DesktopNative]::keybd_event(0x50, 0, 0, [UIntPtr]::Zero)
-            [DesktopNative]::keybd_event(0x50, 0, 0x0002, [UIntPtr]::Zero)
+            # 点击工具栏中的“贴图”，避免 hosted runner 的终端抢走键盘焦点。
+            $pinButtonX = $endX - 67
+            $pinButtonY = $endY + 30
+            [DesktopNative]::SetCursorPos($pinButtonX, $pinButtonY) | Out-Null
+            [DesktopNative]::mouse_event(0x0002, 0, 0, 0, [UIntPtr]::Zero)
+            [DesktopNative]::mouse_event(0x0004, 0, 0, 0, [UIntPtr]::Zero)
             $pin = Wait-ProcessWindowNearSize `
               -ProcessId $screenshotProcess.Id `
               -ExpectedWidth ($endX - $startX) `
