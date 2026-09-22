@@ -131,7 +131,7 @@ jobs:
               [int]$ProcessId,
               [int]$MinWidth,
               [int]$MinHeight,
-              [int]$TimeoutSeconds = 45
+              [int]$TimeoutSeconds = 20
             )
             $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
             while ((Get-Date) -lt $deadline) {
@@ -157,7 +157,7 @@ jobs:
               [int]$ExpectedWidth,
               [int]$ExpectedHeight,
               [int]$Tolerance = 120,
-              [int]$TimeoutSeconds = 45
+              [int]$TimeoutSeconds = 20
             )
             $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
             while ((Get-Date) -lt $deadline) {
@@ -219,7 +219,9 @@ jobs:
           try {
             Remove-Item Env:ZTOOLS_E2E_PLUGIN_NAME -ErrorAction SilentlyContinue
             Remove-Item Env:ZTOOLS_E2E_PLUGIN_FEATURE -ErrorAction SilentlyContinue
-            $launcherProcess = Start-Process -FilePath $executable -PassThru
+            $launcherProcess = Start-Process -FilePath $executable -PassThru `
+              -RedirectStandardOutput 'artifacts/launcher-stdout.log' `
+              -RedirectStandardError 'artifacts/launcher-stderr.log'
             $launcher = Wait-ProcessWindow -ProcessId $launcherProcess.Id -MinWidth 700 -MinHeight 40
             $diagnostics.launcherVisible = $true
             Save-DesktopScreenshot -Path 'artifacts/01-launcher.png'
@@ -228,7 +230,9 @@ jobs:
 
             $env:ZTOOLS_E2E_PLUGIN_NAME = 'screenshot'
             $env:ZTOOLS_E2E_PLUGIN_FEATURE = 'capture'
-            $screenshotProcess = Start-Process -FilePath $executable -PassThru
+            $screenshotProcess = Start-Process -FilePath $executable -PassThru `
+              -RedirectStandardOutput 'artifacts/screenshot-stdout.log' `
+              -RedirectStandardError 'artifacts/screenshot-stderr.log'
             $editor = Wait-ProcessWindow -ProcessId $screenshotProcess.Id -MinWidth 800 -MinHeight 600
             $diagnostics.editorVisible = $true
             $editorRect = New-Object DesktopNative+Rect
