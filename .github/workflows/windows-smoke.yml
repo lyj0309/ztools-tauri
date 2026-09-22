@@ -6,7 +6,7 @@ on:
       release_tag:
         description: Release tag whose portable executable is tested
         required: true
-        default: v0.1.7
+        default: v0.1.8
 
 permissions:
   contents: read
@@ -46,6 +46,7 @@ jobs:
           Add-Type @'
           using System;
           using System.Runtime.InteropServices;
+          using System.Text;
 
           public static class DesktopNative {
               private delegate bool EnumWindowsProc(IntPtr window, IntPtr parameter);
@@ -82,6 +83,9 @@ jobs:
               [DllImport("user32.dll")]
               public static extern void keybd_event(byte virtualKey, byte scanCode, uint flags, UIntPtr extraInfo);
 
+              [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+              private static extern int GetWindowText(IntPtr window, StringBuilder text, int maxCount);
+
               public static IntPtr FindLargestVisibleWindow(int processId) {
                   IntPtr result = IntPtr.Zero;
                   long largestArea = 0;
@@ -103,14 +107,14 @@ jobs:
                   return result;
               }
 
-              public static IntPtr FindVisibleWindowNearSize(int processId, int expectedWidth, int expectedHeight) {
+              public static IntPtr FindVisibleWindowByTitleNearSize(string title, int expectedWidth, int expectedHeight) {
                   IntPtr result = IntPtr.Zero;
                   long bestDistance = long.MaxValue;
                   EnumWindows(delegate (IntPtr window, IntPtr parameter) {
-                      uint owner;
-                      GetWindowThreadProcessId(window, out owner);
                       Rect rect;
-                      if (owner == processId && IsWindowVisible(window) && GetWindowRect(window, out rect)) {
+                      StringBuilder text = new StringBuilder(256);
+                      GetWindowText(window, text, text.Capacity);
+                      if (text.ToString().Contains(title) && IsWindowVisible(window) && GetWindowRect(window, out rect)) {
                           long width = Math.Max(0, rect.Right - rect.Left);
                           long height = Math.Max(0, rect.Bottom - rect.Top);
                           long distance = Math.Abs(width - expectedWidth) + Math.Abs(height - expectedHeight);
@@ -151,9 +155,9 @@ jobs:
             throw "Timed out waiting for process $ProcessId window of at least ${MinWidth}x${MinHeight}"
           }
 
-          function Wait-ProcessWindowNearSize {
+          function Wait-WindowByTitleNearSize {
             param(
-              [int]$ProcessId,
+              [string]$Title,
               [int]$ExpectedWidth,
               [int]$ExpectedHeight,
               [int]$Tolerance = 120,
@@ -161,7 +165,7 @@ jobs:
             )
             $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
             while ((Get-Date) -lt $deadline) {
-              $window = [DesktopNative]::FindVisibleWindowNearSize($ProcessId, $ExpectedWidth, $ExpectedHeight)
+              $window = [DesktopNative]::FindVisibleWindowByTitleNearSize($Title, $ExpectedWidth, $ExpectedHeight)
               if ($window -ne [IntPtr]::Zero) {
                 $rect = New-Object DesktopNative+Rect
                 if ([DesktopNative]::GetWindowRect($window, [ref]$rect)) {
@@ -175,7 +179,7 @@ jobs:
               }
               Start-Sleep -Milliseconds 250
             }
-            throw "Timed out waiting for process $ProcessId window near ${ExpectedWidth}x${ExpectedHeight}"
+            throw "Timed out waiting for $Title window near ${ExpectedWidth}x${ExpectedHeight}"
           }
 
           function Save-DesktopScreenshot {
@@ -266,8 +270,8 @@ jobs:
             New-Item -ItemType File -Path $env:ZTOOLS_E2E_SCREENSHOT_PIN_TRIGGER -Force | Out-Null
             Start-Sleep -Seconds 1
             Save-DesktopScreenshot -Path 'artifacts/04-after-pin-click.png'
-            $pin = Wait-ProcessWindowNearSize `
-              -ProcessId $screenshotProcess.Id `
+            $pin = Wait-WindowByTitleNearSize `
+              -Title 'ZTools 贴图' `
               -ExpectedWidth ($endX - $startX) `
               -ExpectedHeight ($endY - $startY)
             $diagnostics.pinVisible = $true

@@ -213,11 +213,9 @@ fn schedule_e2e_pin_trigger(app: &AppHandle, editor: &WebviewWindow) {
                     editor.eval("document.querySelector('[data-action=\"pin\"]')?.click()");
                 eprintln!("[e2e] screenshot pin trigger evaluated: {result:?}");
                 std::thread::sleep(std::time::Duration::from_secs(2));
-                if app.get_webview_window(EDITOR_LABEL).is_some() {
-                    // 发布版 WebView2 可能忽略后台 eval；回退到正式贴图命令验证原生窗口链路。
-                    let result = create_e2e_native_pin(&app, &editor);
-                    eprintln!("[e2e] screenshot native pin fallback: {result:?}");
-                }
+                // 发布版 WebView2 可能接受但不执行后台 eval；固定调用正式命令验证原生窗口链路。
+                let result = create_e2e_native_pin(&app, &editor);
+                eprintln!("[e2e] screenshot native pin fallback: {result:?}");
                 return;
             }
             std::thread::sleep(std::time::Duration::from_millis(250));
