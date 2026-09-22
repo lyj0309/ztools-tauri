@@ -192,6 +192,64 @@ jobs:
             }
           }
 
+          function Invoke-WebViewScript {
+            param(
+              [string]$Title,
+              [string]$Expression,
+              [int]$TimeoutSeconds = 15
+            )
+            $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+            $target = $null
+            while ((Get-Date) -lt $deadline) {
+              try {
+                $targets = Invoke-RestMethod -Uri 'http://127.0.0.1:9222/json/list'
+                $target = @($targets) | Where-Object { $_.title -eq $Title } | Select-Object -First 1
+                if ($target) { break }
+              } catch {
+                Start-Sleep -Milliseconds 250
+              }
+            }
+            if (-not $target) {
+              throw "Timed out waiting for WebView2 target: $Title"
+            }
+
+            $socket = [System.Net.WebSockets.ClientWebSocket]::new()
+            try {
+              $socket.ConnectAsync([Uri]$target.webSocketDebuggerUrl, [Threading.CancellationToken]::None).GetAwaiter().GetResult()
+              $request = @{
+                id = 1
+                method = 'Runtime.evaluate'
+                params = @{
+                  expression = $Expression
+                  awaitPromise = $true
+                  returnByValue = $true
+                }
+              } | ConvertTo-Json -Compress -Depth 6
+              $requestBytes = [Text.Encoding]::UTF8.GetBytes($request)
+              $requestSegment = [ArraySegment[byte]]::new($requestBytes)
+              $socket.SendAsync($requestSegment, [Net.WebSockets.WebSocketMessageType]::Text, $true, [Threading.CancellationToken]::None).GetAwaiter().GetResult()
+
+              $buffer = [byte[]]::new(65536)
+              while ($true) {
+                $response = [Text.StringBuilder]::new()
+                do {
+                  $segment = [ArraySegment[byte]]::new($buffer)
+                  $received = $socket.ReceiveAsync($segment, [Threading.CancellationToken]::None).GetAwaiter().GetResult()
+                  [void]$response.Append([Text.Encoding]::UTF8.GetString($buffer, 0, $received.Count))
+                } while (-not $received.EndOfMessage)
+                $payload = $response.ToString() | ConvertFrom-Json
+                if ($payload.id -eq 1) {
+                  if ($payload.result.exceptionDetails) {
+                    throw "WebView2 evaluation failed: $($payload.result.exceptionDetails.text)"
+                  }
+                  return $payload.result.result.value
+                }
+              }
+            } finally {
+              $socket.Dispose()
+            }
+          }
+
           function Stop-TestProcess {
             param([System.Diagnostics.Process]$Process)
             if ($Process -and -not $Process.HasExited) {
@@ -230,6 +288,7 @@ jobs:
 
             $env:ZTOOLS_E2E_PLUGIN_NAME = 'screenshot'
             $env:ZTOOLS_E2E_PLUGIN_FEATURE = 'capture'
+            $env:WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS = '--remote-debugging-port=9222'
             $screenshotProcess = Start-Process -FilePath $executable -PassThru `
               -RedirectStandardOutput 'artifacts/screenshot-stdout.log' `
               -RedirectStandardError 'artifacts/screenshot-stderr.log'
@@ -262,17 +321,9 @@ jobs:
             Start-Sleep -Seconds 1
             Save-DesktopScreenshot -Path 'artifacts/03-selection.png'
 
-            # 点击工具栏中的“贴图”，避免 hosted runner 的终端抢走键盘焦点。
-            $pinButtonX = $endX - 67
-            $pinButtonY = $endY + 30
-            [DesktopNative]::SetCursorPos($pinButtonX, $pinButtonY) | Out-Null
-            Start-Sleep -Milliseconds 500
-            [DesktopNative]::mouse_event(0x0002, 0, 0, 0, [UIntPtr]::Zero)
-            Start-Sleep -Milliseconds 150
-            [DesktopNative]::mouse_event(0x0004, 0, 0, 0, [UIntPtr]::Zero)
-            Start-Sleep -Milliseconds 300
-            [DesktopNative]::keybd_event(0x20, 0, 0, [UIntPtr]::Zero)
-            [DesktopNative]::keybd_event(0x20, 0, 0x0002, [UIntPtr]::Zero)
+            Invoke-WebViewScript `
+              -Title 'ZTools 截图' `
+              -Expression 'document.querySelector(''[data-action="pin"]'').click()'
             Start-Sleep -Seconds 1
             Save-DesktopScreenshot -Path 'artifacts/04-after-pin-click.png'
             $pin = Wait-ProcessWindowNearSize `
