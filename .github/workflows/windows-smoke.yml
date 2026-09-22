@@ -6,7 +6,7 @@ on:
       release_tag:
         description: Release tag whose portable executable is tested
         required: true
-        default: v0.1.5
+        default: v0.1.6
 
 permissions:
   contents: read
@@ -192,67 +192,6 @@ jobs:
             }
           }
 
-          function Invoke-WebViewScript {
-            param(
-              [string]$Title,
-              [string]$Expression,
-              [int]$TimeoutSeconds = 15
-            )
-            $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
-            $target = $null
-            while ((Get-Date) -lt $deadline) {
-              try {
-                $targets = Invoke-RestMethod -Uri 'http://127.0.0.1:9222/json/list'
-                $target = @($targets) | Where-Object { $_.title -eq $Title } | Select-Object -First 1
-                if (-not $target) {
-                  $target = @($targets) | Where-Object { $_.type -eq 'page' } | Select-Object -First 1
-                }
-                if ($target) { break }
-              } catch {
-                Start-Sleep -Milliseconds 250
-              }
-            }
-            if (-not $target) {
-              throw "Timed out waiting for WebView2 target: $Title"
-            }
-
-            $socket = [System.Net.WebSockets.ClientWebSocket]::new()
-            try {
-              $socket.ConnectAsync([Uri]$target.webSocketDebuggerUrl, [Threading.CancellationToken]::None).GetAwaiter().GetResult()
-              $request = @{
-                id = 1
-                method = 'Runtime.evaluate'
-                params = @{
-                  expression = $Expression
-                  awaitPromise = $true
-                  returnByValue = $true
-                }
-              } | ConvertTo-Json -Compress -Depth 6
-              $requestBytes = [Text.Encoding]::UTF8.GetBytes($request)
-              $requestSegment = [ArraySegment[byte]]::new($requestBytes)
-              $socket.SendAsync($requestSegment, [Net.WebSockets.WebSocketMessageType]::Text, $true, [Threading.CancellationToken]::None).GetAwaiter().GetResult()
-
-              $buffer = [byte[]]::new(65536)
-              while ($true) {
-                $response = [Text.StringBuilder]::new()
-                do {
-                  $segment = [ArraySegment[byte]]::new($buffer)
-                  $received = $socket.ReceiveAsync($segment, [Threading.CancellationToken]::None).GetAwaiter().GetResult()
-                  [void]$response.Append([Text.Encoding]::UTF8.GetString($buffer, 0, $received.Count))
-                } while (-not $received.EndOfMessage)
-                $payload = $response.ToString() | ConvertFrom-Json
-                if ($payload.id -eq 1) {
-                  if ($payload.result.exceptionDetails) {
-                    throw "WebView2 evaluation failed: $($payload.result.exceptionDetails.text)"
-                  }
-                  return $payload.result.result.value
-                }
-              }
-            } finally {
-              $socket.Dispose()
-            }
-          }
-
           function Stop-TestProcess {
             param([System.Diagnostics.Process]$Process)
             if ($Process -and -not $Process.HasExited) {
@@ -291,7 +230,7 @@ jobs:
 
             $env:ZTOOLS_E2E_PLUGIN_NAME = 'screenshot'
             $env:ZTOOLS_E2E_PLUGIN_FEATURE = 'capture'
-            $env:WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS = '--remote-debugging-port=9222'
+            $env:ZTOOLS_E2E_SCREENSHOT_PIN_TRIGGER = Join-Path $testRoot 'pin.trigger'
             $screenshotProcess = Start-Process -FilePath $executable -PassThru `
               -RedirectStandardOutput 'artifacts/screenshot-stdout.log' `
               -RedirectStandardError 'artifacts/screenshot-stderr.log'
@@ -324,9 +263,7 @@ jobs:
             Start-Sleep -Seconds 1
             Save-DesktopScreenshot -Path 'artifacts/03-selection.png'
 
-            Invoke-WebViewScript `
-              -Title 'ZTools 截图' `
-              -Expression 'document.querySelector(''[data-action="pin"]'').click()'
+            New-Item -ItemType File -Path $env:ZTOOLS_E2E_SCREENSHOT_PIN_TRIGGER -Force | Out-Null
             Start-Sleep -Seconds 1
             Save-DesktopScreenshot -Path 'artifacts/04-after-pin-click.png'
             $pin = Wait-ProcessWindowNearSize `

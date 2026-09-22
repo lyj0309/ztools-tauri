@@ -188,7 +188,34 @@ pub(crate) async fn start_editor(app: AppHandle, main: WebviewWindow) -> Result<
         crate::commands::launcher::show_main_window(&app);
         return Err(error.to_string());
     }
+    schedule_e2e_pin_trigger(&editor);
     Ok(())
+}
+
+/// 在隔离测试模式下等待外部触发文件，再点击截图编辑器的贴图按钮。
+fn schedule_e2e_pin_trigger(editor: &WebviewWindow) {
+    if std::env::var("ZTOOLS_E2E").as_deref() != Ok("1") {
+        return;
+    }
+    let Some(trigger) = std::env::var_os("ZTOOLS_E2E_SCREENSHOT_PIN_TRIGGER") else {
+        return;
+    };
+    let trigger = PathBuf::from(trigger);
+    let editor = editor.clone();
+    std::thread::spawn(move || {
+        // 等待桌面自动化完成选区，超时后退出，避免测试钩子常驻。
+        for _ in 0..120 {
+            if trigger.is_file() {
+                let _ = fs::remove_file(&trigger);
+                let result =
+                    editor.eval("document.querySelector('[data-action=\"pin\"]')?.click()");
+                eprintln!("[e2e] screenshot pin trigger evaluated: {result:?}");
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(250));
+        }
+        eprintln!("[e2e] screenshot pin trigger timed out");
+    });
 }
 
 /// 返回当前编辑器源 PNG 的原始字节。
