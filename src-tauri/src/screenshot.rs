@@ -222,13 +222,7 @@ fn schedule_e2e_pin_trigger(app: &AppHandle, editor: &WebviewWindow) {
             eprintln!("[e2e] screenshot pin trigger timed out");
             return;
         }
-        let result = editor.eval("document.querySelector('[data-action=\"pin\"]')?.click()");
-        eprintln!("[e2e] screenshot pin trigger evaluated: {result:?}");
-        let _ = tauri::async_runtime::spawn_blocking(|| {
-            std::thread::sleep(std::time::Duration::from_secs(2));
-        })
-        .await;
-        // 发布版 WebView2 可能接受但不执行后台 eval；固定调用正式命令验证原生窗口链路。
+        // 触发文件在拖选完成后创建，直接调用正式命令验证原生窗口链路。
         let result = create_e2e_native_pin(&app, &editor);
         eprintln!("[e2e] screenshot native pin fallback: {result:?}");
     });
