@@ -270,6 +270,9 @@ jobs:
             [DesktopNative]::mouse_event(0x0002, 0, 0, 0, [UIntPtr]::Zero)
             Start-Sleep -Milliseconds 150
             [DesktopNative]::mouse_event(0x0004, 0, 0, 0, [UIntPtr]::Zero)
+            Start-Sleep -Milliseconds 300
+            [DesktopNative]::keybd_event(0x20, 0, 0, [UIntPtr]::Zero)
+            [DesktopNative]::keybd_event(0x20, 0, 0x0002, [UIntPtr]::Zero)
             Start-Sleep -Seconds 1
             Save-DesktopScreenshot -Path 'artifacts/04-after-pin-click.png'
             $pin = Wait-ProcessWindowNearSize `
