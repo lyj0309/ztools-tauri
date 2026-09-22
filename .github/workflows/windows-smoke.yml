@@ -6,7 +6,7 @@ on:
       release_tag:
         description: Release tag whose portable executable is tested
         required: true
-        default: v0.1.8
+        default: v0.1.9
 
 permissions:
   contents: read

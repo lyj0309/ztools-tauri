@@ -238,15 +238,22 @@ fn create_e2e_native_pin(app: &AppHandle, editor: &WebviewWindow) -> Result<(), 
     cropped
         .write_to(&mut output, image::ImageFormat::Png)
         .map_err(|error| format!("无法编码 E2E 贴图：{error}"))?;
-    screenshot_pin(
-        output.into_inner(),
-        f64::from(x),
-        f64::from(y),
-        f64::from(width),
-        f64::from(height),
-        app.clone(),
-        editor.clone(),
-    )
+    let data = output.into_inner();
+    let pin_app = app.clone();
+    let pin_editor = editor.clone();
+    app.run_on_main_thread(move || {
+        let result = screenshot_pin(
+            data,
+            f64::from(x),
+            f64::from(y),
+            f64::from(width),
+            f64::from(height),
+            pin_app,
+            pin_editor,
+        );
+        eprintln!("[e2e] screenshot native pin result: {result:?}");
+    })
+    .map_err(|error| error.to_string())
 }
 
 /// 返回当前编辑器源 PNG 的原始字节。
