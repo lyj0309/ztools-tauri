@@ -53,7 +53,7 @@ jobs:
       - name: Test Windows native OCR
         if: runner.os == 'Windows'
         run: cargo test --manifest-path src-tauri/Cargo.toml recognizes_local_fixture -- --ignored
-      - name: Test Windows ML OCR with downloaded tiny models
+      - name: Test Windows ML OCR with downloaded small models
         if: runner.os == 'Windows'
         shell: pwsh
         run: |

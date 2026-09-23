@@ -15,14 +15,14 @@ use tauri::{Manager, WebviewWindow};
 
 use crate::ocr::OcrResult;
 
-const DET_URL: &str = "https://paddle-model-ecology.bj.bcebos.com/paddlex/official_inference_model/paddle3.0.0/tmp/PP-OCRv6_tiny_det_onnx.tar";
-const REC_URL: &str = "https://paddle-model-ecology.bj.bcebos.com/paddlex/official_inference_model/paddle3.0.0/tmp/PP-OCRv6_tiny_rec_0515_onnx.tar";
-const DET_SHA256: &str = "220c0bd1074bd9415434f8b08339bb559c41a2ffd33c3ea34ded6a5fc63158b6";
-const REC_SHA256: &str = "71a9a34ee45cb376cfdf8a849eb0cc66755e59baaccb6b94045d9ba6e5b6d012";
-const DET_ONNX_SHA256: &str = "a56a3430a96a6c691f8bfbbb297208bb9573c3d70083d6382071cbd92d0a152e";
-const REC_ONNX_SHA256: &str = "d5de4cb712dc90158c4f966e7ed25b87b5d16a1ab7c8e14b9f9c2b4aa269dd36";
-const DET_PREFIX: &str = "PP-OCRv6_tiny_det_onnx";
-const REC_PREFIX: &str = "PP-OCRv6_tiny_rec_0515_onnx";
+const DET_URL: &str = "https://paddle-model-ecology.bj.bcebos.com/paddlex/official_inference_model/paddle3.0.0/tmp/PP-OCRv6_small_det_onnx.tar";
+const REC_URL: &str = "https://paddle-model-ecology.bj.bcebos.com/paddlex/official_inference_model/paddle3.0.0/tmp/PP-OCRv6_small_rec_0515_onnx.tar";
+const DET_SHA256: &str = "b11d72c3f2c0baad6123da06e661afeca00ed743a809eac9ecacd69f67511cf3";
+const REC_SHA256: &str = "0efc977cb01ac10c5cb89e0cae546bc4b6a723ac90411b31139fba82be5b31cc";
+const DET_ONNX_SHA256: &str = "beb1d63ec71c8af6aced9abaa9ee1ba865277fb7aa3366f0d0b5d6c41a5514f4";
+const REC_ONNX_SHA256: &str = "0982f0ed51443ff4aa497a46fa9f9674024c02af6cc80ad2d0e793ffbe68ea01";
+const DET_PREFIX: &str = "PP-OCRv6_small_det_onnx";
+const REC_PREFIX: &str = "PP-OCRv6_small_rec_0515_onnx";
 // Windows App SDK 1.8.1 的 MSIX 运行时版本为 8000.625.330.0。
 const MIN_WINDOWS_ML_RUNTIME: u64 = (8000_u64 << 48) | (625_u64 << 32) | (330_u64 << 16);
 static WINDOWS_ML_READY: OnceLock<bool> = OnceLock::new();
@@ -120,7 +120,7 @@ fn bootstrap_path() -> Result<PathBuf, String> {
 }
 
 /**
- * 在第一次需要 Windows ML 时下载并校验官方 tiny 模型，随后复用本地缓存。
+ * 在第一次需要 Windows ML 时下载并校验官方 small 模型，随后复用本地缓存。
  * @param window 发起 OCR 的窗口，用于定位隔离的测试缓存。
  * @returns 检测、识别和字典的本地路径。
  * @throws 下载、校验或缓存失败。
@@ -139,12 +139,12 @@ pub(crate) async fn ensure_models(window: &WebviewWindow) -> Result<ModelPaths, 
             .map_err(|error| error.to_string())?
     }
     .join("ocr")
-    .join("ppocrv6-tiny");
+    .join("ppocrv6-small");
     ensure_models_in(&root).await
 }
 
 /**
- * 在给定缓存目录准备官方 tiny 模型，供桌面调用和隔离测试复用。
+ * 在给定缓存目录准备官方 small 模型，供桌面调用和隔离测试复用。
  * @param root 模型缓存目录。
  * @returns 三个推理文件路径。
  * @throws 下载、解包或缓存失败。
@@ -164,11 +164,11 @@ async fn ensure_models_in(root: &Path) -> Result<ModelPaths, String> {
     // 只复用完整缓存；下载文件使用固定哈希校验，避免损坏或被替换的模型投入推理。
     if !valid_model_cache(&det, &rec, &yml, &dict) {
         let client = reqwest::Client::builder()
-            .timeout(Duration::from_secs(35))
+            .timeout(Duration::from_secs(120))
             .build()
             .map_err(|error| error.to_string())?;
-        let det_tar = download_archive(&client, DET_URL, DET_SHA256, 3_000_000).await?;
-        let rec_tar = download_archive(&client, REC_URL, REC_SHA256, 6_000_000).await?;
+        let det_tar = download_archive(&client, DET_URL, DET_SHA256, 11_000_000).await?;
+        let rec_tar = download_archive(&client, REC_URL, REC_SHA256, 23_000_000).await?;
         let det_onnx = extract_entry(&det_tar, DET_PREFIX, "inference.onnx")?;
         let rec_onnx = extract_entry(&rec_tar, REC_PREFIX, "inference.onnx")?;
         let rec_yml = extract_entry(&rec_tar, REC_PREFIX, "inference.yml")?;
@@ -267,7 +267,7 @@ fn extract_entry(archive: &[u8], prefix: &str, filename: &str) -> Result<Vec<u8>
             .to_string_lossy()
             == target
         {
-            if entry.size() > 8_000_000 {
+            if entry.size() > 23_000_000 {
                 return Err("OCR 模型展开大小异常".to_owned());
             }
             let mut bytes = Vec::new();
@@ -319,9 +319,9 @@ fn publish(path: &Path, content: &[u8]) -> Result<(), String> {
 }
 
 /**
- * 使用系统共享 ONNX Runtime 和本地 PP-OCRv6 tiny 模型识别截图。
+ * 使用系统共享 ONNX Runtime 和本地 PP-OCRv6 small 模型识别截图。
  * @param image 已校验截图。
- * @param language 请求语言，tiny 模型以中英文识别为主。
+ * @param language 请求语言，small 模型以中英文识别为主。
  * @param paths 本地检测、识别和字典文件。
  * @returns 识别结果。
  * @throws 运行时或模型推理失败。
@@ -349,7 +349,7 @@ pub(crate) fn recognize(
             .collect::<Vec<_>>()
             .join("\n"),
         language: language.to_owned(),
-        engine: "Windows ML · PP-OCRv6 tiny",
+        engine: "Windows ML · PP-OCRv6 small",
     })
 }
 
@@ -368,7 +368,7 @@ mod tests {
         let paths = tauri::async_runtime::block_on(super::ensure_models_in(&root)).unwrap();
         let image = image::load_from_memory(include_bytes!("../tests/fixtures/ocr.png")).unwrap();
         let result = super::recognize(image, "en-US", paths).unwrap();
-        // tiny 模型对字体中的 O/0 会混淆；验证完整短语及数字，而不修改用户实际 OCR 文本。
+        // 字体中的 O/0 可能混淆；验证完整短语及数字，而不修改用户实际 OCR 文本。
         let normalized = result.text.to_uppercase().replace('0', "O");
         assert!(normalized.contains("ZTOOLS OCR"), "{}", result.text);
         assert!(result.text.contains("2026"), "{}", result.text);
