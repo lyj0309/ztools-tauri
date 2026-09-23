@@ -14,7 +14,11 @@ concurrency:
 
 jobs:
   validate:
-    runs-on: ubuntu-22.04
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, windows-latest]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
@@ -33,6 +37,7 @@ jobs:
           workspaces: src-tauri -> target
           shared-key: ci
       - name: Install Linux desktop dependencies
+        if: runner.os == 'Linux'
         run: |
           sudo apt-get update
           sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev libssl-dev libxdo-dev patchelf xdg-utils
@@ -46,5 +51,8 @@ jobs:
         run: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --all-features -- -D warnings
       - name: Test Rust
         run: cargo test --manifest-path src-tauri/Cargo.toml --all-features
+      - name: Test Windows native OCR
+        if: runner.os == 'Windows'
+        run: cargo test --manifest-path src-tauri/Cargo.toml recognizes_local_fixture -- --ignored
       - name: Validate compatibility ledger
         run: python3 -m json.tool docs/plugin-api-compatibility.json >/dev/null

@@ -29,6 +29,27 @@ type BundledPluginFile = (&'static str, &'static [u8]);
 type BundledPlugin = (&'static str, &'static [BundledPluginFile]);
 const BUNDLED_PLUGIN_FILES: &[BundledPlugin] = &[
     (
+        "baidu-translate",
+        &[
+            (
+                "plugin.json",
+                include_bytes!("../resources/default-plugins/baidu-translate/plugin.json"),
+            ),
+            (
+                "index.html",
+                include_bytes!("../resources/default-plugins/baidu-translate/index.html"),
+            ),
+            (
+                "style.css",
+                include_bytes!("../resources/default-plugins/baidu-translate/style.css"),
+            ),
+            (
+                "main.js",
+                include_bytes!("../resources/default-plugins/baidu-translate/main.js"),
+            ),
+        ],
+    ),
+    (
         "setting",
         &[
             (
@@ -2153,7 +2174,10 @@ mod tests {
         .expect("fixture manifest should be writable");
     }
 
-    /// 验证空数据目录会得到三个默认插件，且内嵌文件能在损坏后自动恢复。
+    /**
+     * 验证空数据目录获得全部默认插件，损坏文件能够自动恢复。
+     * @returns 无返回值。
+     */
     #[test]
     fn installs_and_repairs_bundled_plugins() {
         let root = fixture_root("bundled-root");
@@ -2165,11 +2189,14 @@ mod tests {
         let plugins = runtime
             .installed_plugins()
             .expect("bundled plugins should list");
-        assert_eq!(plugins.len(), 3);
+        assert_eq!(plugins.len(), super::BUNDLED_PLUGIN_FILES.len());
         assert!(plugins.iter().all(|plugin| plugin.built_in));
         assert!(plugins.iter().any(|plugin| plugin.name == "setting"));
         assert!(plugins.iter().any(|plugin| plugin.name == "system"));
         assert!(plugins.iter().any(|plugin| plugin.name == "screenshot"));
+        assert!(plugins
+            .iter()
+            .any(|plugin| plugin.name == "baidu-translate"));
         assert!(runtime.uninstall("setting").is_err());
 
         // 模拟用户目录中的 manifest 被截断，再次启动应恢复编译时版本。

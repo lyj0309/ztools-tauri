@@ -6,12 +6,14 @@ mod launcher;
 mod legacy;
 mod legacy_lmdb_v2;
 mod models;
+mod ocr;
 mod plugin;
 mod screenshot;
 mod services;
 mod state;
 mod storage;
 mod sync;
+mod translation;
 
 use std::{io, path::PathBuf};
 
@@ -75,6 +77,10 @@ pub fn run() {
             commands::system::get_sync_status,
             commands::system::send_test_notification,
             commands::system::capture_screen,
+            translation::baidu_translate_text,
+            translation::baidu_translate_image,
+            ocr::plugin_ocr,
+            ocr::plugin_ocr_copy_text,
             screenshot::screenshot_editor_source,
             screenshot::screenshot_editor_info,
             screenshot::screenshot_editor_ready,

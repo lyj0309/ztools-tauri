@@ -1,0 +1,19 @@
+<!doctype html>
+<html lang="zh-CN">
+<head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>百度翻译</title><link rel="stylesheet" href="style.css"></head>
+<body>
+  <header><strong>百度翻译</strong><nav aria-label="翻译方式"><button id="text-tab" class="active" type="button">文字</button><button id="image-tab" type="button">图片</button></nav><button id="settings-toggle" type="button">接口设置</button></header>
+  <section id="settings" hidden>
+    <p>使用百度翻译开放平台的 APPID 和密钥。文字、图片翻译需分别开通服务。</p>
+    <label>APPID<input id="appid" autocomplete="off" inputmode="numeric"></label><label>密钥<input id="api-key" type="password" autocomplete="off"></label>
+    <div class="settings-actions"><button id="api-docs" type="button">打开百度控制台</button><button id="save-settings" class="primary" type="button">保存</button><button id="clear-settings" type="button">清除</button></div>
+  </section>
+  <main>
+    <div class="languages"><select id="from" aria-label="原文语言"></select><span>→</span><select id="to" aria-label="译文语言"></select><button id="translate" class="primary" type="button">翻译</button></div>
+    <section id="image-input" hidden><div class="image-actions"><label class="button">选择图片<input id="file" type="file" accept="image/png,image/jpeg,image/webp" hidden></label><span>也可按 Ctrl+V 粘贴图片</span><button id="clear-image" type="button">移除</button></div><img id="preview" alt="待翻译图片" hidden></section>
+    <div class="columns"><label>原文<textarea id="source" placeholder="输入文字，Ctrl+Enter 翻译"></textarea></label><label>译文<textarea id="result" placeholder="翻译结果" readonly></textarea></label></div>
+    <footer><span id="status" role="status">文字与图片通过百度官方 API 翻译</span><button id="copy" type="button" disabled>复制译文</button></footer>
+  </main>
+  <script type="module" src="main.js"></script>
+</body>
+</html>

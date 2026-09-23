@@ -157,3 +157,13 @@ body,
   margin: 0 2px;
   background: rgba(255, 255, 255, 0.16);
 }
+
+.ocr-panel { position: fixed; z-index: 8; top: 64px; right: 20px; width: min(430px, calc(100vw - 40px)); padding: 16px; color: #edf0f3; background: #24262b; border: 1px solid #51565e; border-radius: 10px; box-shadow: 0 8px 28px #0005; user-select: text; }
+.ocr-panel header, .ocr-panel footer, .ocr-options { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.ocr-options { margin: 14px 0; }
+.ocr-panel button, .ocr-panel select { color: inherit; background: #373c43; border: 1px solid #5a606a; border-radius: 5px; padding: 7px 10px; cursor: pointer; }
+.ocr-panel textarea { width: 100%; height: min(260px, 40vh); padding: 10px; resize: vertical; color: inherit; background: #191b1f; border: 1px solid #5a606a; border-radius: 5px; font: inherit; font-size: 14px; line-height: 1.7; user-select: text; }
+.ocr-panel footer { margin-top: 12px; font-size: 12px; }
+.ocr-panel footer span { flex: 1; overflow-wrap: anywhere; }
+.ocr-panel footer button { flex-shrink: 0; }
+.ocr-panel button:disabled { opacity: .5; cursor: default; }

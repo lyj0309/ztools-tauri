@@ -1,0 +1,11 @@
+{
+  "name": "baidu-translate",
+  "title": "百度翻译",
+  "description": "百度官方 API 文字翻译与图片翻译",
+  "version": "1.0.0",
+  "main": "index.html",
+  "features": [
+    {"code": "text", "explain": "文字翻译", "cmds": ["百度翻译", "翻译", "Baidu Translate"]},
+    {"code": "image", "explain": "图片翻译 · 选择或粘贴图片", "cmds": ["百度图片翻译", "图片翻译"]}
+  ]
+}

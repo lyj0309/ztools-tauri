@@ -2,7 +2,7 @@
   "name": "screenshot",
   "title": "截图",
   "description": "ZTools 内置选区截图、编辑标注和悬浮贴图插件",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "main": "index.html",
   "features": [
     {

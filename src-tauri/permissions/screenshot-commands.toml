@@ -2,6 +2,8 @@
 identifier = "screenshot-commands"
 description = "Allows screenshot editor and pin windows to access only their temporary image session."
 commands.allow = [
+  "plugin_ocr",
+  "plugin_ocr_copy_text",
   "screenshot_editor_source",
   "screenshot_editor_info",
   "screenshot_editor_ready",

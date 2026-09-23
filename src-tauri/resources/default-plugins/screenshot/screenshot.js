@@ -21,9 +21,16 @@ root.innerHTML = `
     <button type="button" data-action="undo" title="撤销 Ctrl+Z">撤销</button>
     <button type="button" data-action="copy" class="primary" title="复制 Enter">复制</button>
     <button type="button" data-action="save" title="保存 S">保存</button>
+    <button type="button" data-action="ocr" title="识别文字 O">OCR</button>
     <button type="button" data-action="pin" title="贴图 P">贴图</button>
     <button type="button" data-action="cancel" title="取消 Esc">×</button>
   </div>
+  <section class="ocr-panel" aria-label="文字识别结果" hidden>
+    <header><strong>文字识别</strong><button type="button" id="ocr-close" aria-label="关闭识别结果">×</button></header>
+    <div class="ocr-options"><select id="ocr-language" aria-label="识别语言"><option value="auto">系统默认语言</option><option value="zh-Hans">简体中文</option><option value="zh-Hant">繁体中文</option><option value="en-US">English</option><option value="ja-JP">日本語</option><option value="ko-KR">한국어</option></select><button type="button" id="ocr-retry">重新识别</button></div>
+    <textarea id="ocr-text" aria-label="识别文字" placeholder="识别结果会显示在这里，可编辑后复制"></textarea>
+    <footer><span id="ocr-status" role="status"></span><button type="button" id="ocr-copy">复制文字</button></footer>
+  </section>
   <div class="capture-message" hidden></div>
 `;
 const canvas = root.querySelector('.capture-canvas');
@@ -33,6 +40,9 @@ const guide = root.querySelector('.capture-guide');
 const sizeLabel = root.querySelector('.capture-size');
 const textInput = root.querySelector('.capture-text-input');
 const message = root.querySelector('.capture-message');
+const ocrPanel = root.querySelector('.ocr-panel');
+const ocrText = root.querySelector('#ocr-text');
+const ocrStatus = root.querySelector('#ocr-status');
 let sourceImage = null;
 let sourceUrl = '';
 let selection = null;
@@ -457,6 +467,7 @@ function handleToolbarClick(event) {
         return;
     }
     const action = button.dataset.action;
+    if (action === 'ocr') { void recognizeSelection(); return; }
     if (action === 'undo') {
         annotations.pop();
         redraw();
@@ -474,6 +485,10 @@ function handleToolbarClick(event) {
  * @returns 无返回值。
  */
 function handleKeyboard(event) {
+    if (!ocrPanel.hidden && ocrPanel.contains(event.target)) {
+        if (event.key === 'Escape') { event.preventDefault(); ocrPanel.hidden = true; }
+        return;
+    }
     if (event.target === textInput) {
         if (event.key === 'Enter') {
             event.preventDefault();
@@ -501,6 +516,10 @@ function handleKeyboard(event) {
     else if (event.key.toLocaleLowerCase() === 's' && selection) {
         event.preventDefault();
         void exportSelection('save');
+    }
+    else if (event.key.toLocaleLowerCase() === 'o' && selection) {
+        event.preventDefault();
+        void recognizeSelection();
     }
     else if (event.key.toLocaleLowerCase() === 'p' && selection) {
         event.preventDefault();
@@ -564,3 +583,46 @@ window.addEventListener('beforeunload', () => {
 });
 setTool('select');
 void initialize();
+
+/**
+ * 识别当前选区，在原截图上提供可编辑文本而不创建额外窗口。
+ * @returns 识别完成后的 Promise。
+ */
+async function recognizeSelection() {
+    if (busy || !selection) return;
+    busy = true;
+    ocrPanel.hidden = false;
+    toolbar.classList.add('busy');
+    root.querySelector('#ocr-retry').disabled = true;
+    root.querySelector('#ocr-copy').disabled = true;
+    ocrText.value = '';
+    ocrStatus.textContent = '正在本地识别…';
+    try {
+        // 沿用选区渲染，图片只通过二进制 IPC 交给本机 OCR。
+        const rendered = await renderSelection();
+        const result = await invoke('plugin_ocr', rendered.bytes, { headers: { 'x-ztools-ocr-language': root.querySelector('#ocr-language').value } });
+        ocrText.value = result.text;
+        ocrStatus.textContent = result.text ? `本地识别 · ${result.language}` : '没有识别到文字，请调整选区或语言';
+        ocrText.focus();
+    } catch (error) {
+        ocrStatus.textContent = String(error);
+    } finally {
+        busy = false;
+        toolbar.classList.remove('busy');
+        root.querySelector('#ocr-retry').disabled = false;
+        root.querySelector('#ocr-copy').disabled = !ocrText.value;
+    }
+}
+/**
+ * 复制可编辑的识别结果并在面板内反馈状态。
+ * @returns 剪贴板写入完成后的 Promise。
+ */
+async function copyRecognizedText() {
+    try {
+        await invoke('plugin_ocr_copy_text', { text: ocrText.value });
+        ocrStatus.textContent = '文字已复制';
+    } catch (error) { ocrStatus.textContent = String(error); }
+}
+root.querySelector('#ocr-close').addEventListener('click', () => { ocrPanel.hidden = true; });
+root.querySelector('#ocr-retry').addEventListener('click', recognizeSelection);
+root.querySelector('#ocr-copy').addEventListener('click', copyRecognizedText);
