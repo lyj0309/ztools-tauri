@@ -54,4 +54,4 @@ cargo test --manifest-path src-tauri/Cargo.toml
 
 - 默认插件「百度翻译」提供文字和图片两个入口，直接在独立窗口打开百度翻译官网，无需填写 APPID 或密钥。网页自行提交翻译请求；文字翻译首次使用时选择「机翻 · 通用领域」，即可匿名翻译。
 - 图片翻译由百度网页提供上传与识别。站点若要求登录或安全验证，应在网页中正常完成；本应用不代替用户处理验证。百度网页不会获得 ZTools 插件兼容层或本地文件 API。
-- 截图选区后点击「OCR」或按 `O`，可在原界面查看、编辑和复制识别结果，不上传图片。Windows 调用系统 OCR，依赖 Windows 已安装的文字识别语言包；其他平台调用本机 Tesseract（需自行安装及安装语言包）。
+- 截图选区后点击「OCR」或按 `O`，可在原界面查看、编辑和复制识别结果，截图不上传。Windows 如已安装含 Windows ML 的 Windows App Runtime，首次识别时从 Paddle 官方下载约 6 MB 的 PP-OCRv6 tiny 模型到用户缓存，之后离线复用；运行时不可用、下载或推理失败时回退到系统 WinRT OCR（依赖已安装的文字识别语言包）。其他平台调用本机 Tesseract（需自行安装及安装语言包）。便携版内含 Microsoft Windows App SDK bootstrap DLL，其许可见 `src-tauri/resources/windows/LICENSE.txt`。

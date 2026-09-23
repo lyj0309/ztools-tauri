@@ -13,6 +13,8 @@ mod services;
 mod state;
 mod storage;
 mod sync;
+#[cfg(target_os = "windows")]
+mod windows_ml;
 
 use std::{io, path::PathBuf};
 
@@ -30,6 +32,8 @@ use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
 
 /// 注册启动器服务并运行 Tauri 桌面事件循环。
 pub fn run() {
+    #[cfg(target_os = "windows")]
+    windows_ml::initialize();
     let plugin_root = plugin::plugin_root();
     let protocol_root = plugin_root.clone();
     let application = tauri::Builder::default()
