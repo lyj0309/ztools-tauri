@@ -11,6 +11,22 @@ use tauri::{AppHandle, Manager, PhysicalPosition, PhysicalSize};
 
 static SYSTEM_CLIPBOARD: Mutex<Option<arboard::Clipboard>> = Mutex::new(None);
 
+#[cfg(target_os = "windows")]
+/**
+ * 构造不分配控制台窗口的 Windows 后台命令。
+ * @param program 宿主指定的后台程序名称。
+ * @returns 设置 CREATE_NO_WINDOW 标志、尚未启动的命令。
+ */
+pub(crate) fn background_command(program: &str) -> Command {
+    use std::os::windows::process::CommandExt;
+
+    // 在创建进程时就禁止分配控制台，避免 PowerShell 启动后再隐藏仍产生闪窗。
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    let mut command = Command::new(program);
+    command.creation_flags(CREATE_NO_WINDOW);
+    command
+}
+
 /// 获取进程级剪贴板句柄，使 Linux 的 X11/Wayland 选择所有权在写入后继续存活。
 fn system_clipboard() -> Result<MutexGuard<'static, Option<arboard::Clipboard>>, String> {
     let mut clipboard = SYSTEM_CLIPBOARD
@@ -227,7 +243,14 @@ fn capture_display_platform(
 }
 
 #[cfg(target_os = "windows")]
-/// 在 Windows 上按固定物理边界截取显示器，支持负坐标的副屏。
+/**
+ * 在 Windows 上静默截取固定物理边界，支持负坐标副屏。
+ * @param _app 桌面应用句柄，Windows 实现不使用。
+ * @param output 宿主管理的 PNG 输出路径。
+ * @param position 显示器左上角的物理坐标。
+ * @param size 显示器的物理像素尺寸。
+ * @returns 截图成功返回 Ok，否则返回系统错误。
+ */
 fn capture_display_platform(
     _app: &AppHandle,
     output: &PathBuf,
@@ -236,7 +259,7 @@ fn capture_display_platform(
 ) -> Result<(), String> {
     const SCRIPT: &str = "Add-Type -AssemblyName System.Drawing; $o=[Environment]::GetEnvironmentVariable('ZTOOLS_SCREENSHOT_OUTPUT'); $x=[int][Environment]::GetEnvironmentVariable('ZTOOLS_SCREENSHOT_X'); $y=[int][Environment]::GetEnvironmentVariable('ZTOOLS_SCREENSHOT_Y'); $w=[int][Environment]::GetEnvironmentVariable('ZTOOLS_SCREENSHOT_WIDTH'); $h=[int][Environment]::GetEnvironmentVariable('ZTOOLS_SCREENSHOT_HEIGHT'); $i=New-Object System.Drawing.Bitmap $w,$h; $g=[System.Drawing.Graphics]::FromImage($i); $g.CopyFromScreen($x,$y,0,0,$i.Size); $i.Save($o,[System.Drawing.Imaging.ImageFormat]::Png); $g.Dispose(); $i.Dispose()";
     command_result(
-        Command::new("powershell")
+        background_command("powershell")
             // 坐标和路径仅通过环境传入，避免把负坐标或路径解释为 PowerShell 源码。
             .env("ZTOOLS_SCREENSHOT_OUTPUT", output)
             .env("ZTOOLS_SCREENSHOT_X", position.x.to_string())
@@ -309,11 +332,16 @@ fn capture_screen_platform(_app: &AppHandle, output: &PathBuf) -> Result<(), Str
 }
 
 #[cfg(target_os = "windows")]
-/// 使用 Windows 系统程序集截取鼠标所在显示器并保存 PNG。
+/**
+ * 静默调用 Windows 系统程序集截取鼠标所在显示器并保存 PNG。
+ * @param _app 桌面应用句柄，Windows 实现不使用。
+ * @param output 宿主管理的 PNG 输出路径。
+ * @returns 截图成功返回 Ok，否则返回系统错误。
+ */
 fn capture_screen_platform(_app: &AppHandle, output: &PathBuf) -> Result<(), String> {
     const SCRIPT: &str = "Add-Type -AssemblyName System.Windows.Forms; Add-Type -AssemblyName System.Drawing; $o=[Environment]::GetEnvironmentVariable('ZTOOLS_SCREENSHOT_OUTPUT'); $b=[System.Windows.Forms.Screen]::FromPoint([System.Windows.Forms.Cursor]::Position).Bounds; $i=New-Object System.Drawing.Bitmap $b.Width,$b.Height; $g=[System.Drawing.Graphics]::FromImage($i); $g.CopyFromScreen($b.Location,[System.Drawing.Point]::Empty,$b.Size); $i.Save($o,[System.Drawing.Imaging.ImageFormat]::Png); $g.Dispose(); $i.Dispose()";
     command_result(
-        Command::new("powershell")
+        background_command("powershell")
             // 通过子进程环境传入路径，避免 -Command 把 Windows 路径继续解析为脚本源码。
             .env("ZTOOLS_SCREENSHOT_OUTPUT", output)
             .args(["-NoProfile", "-NonInteractive", "-Command", SCRIPT])
@@ -333,8 +361,13 @@ pub(crate) fn reveal_path(path: String) -> Result<(), String> {
     run_open_command(&path, true)
 }
 
-/// 使用系统默认浏览器打开经过校验的 HTTP 或 HTTPS 地址。
+/**
+ * 使用系统默认浏览器打开 HTTP 或 HTTPS 地址，Windows 中转进程不创建控制台。
+ * @param url 要打开的网页地址。
+ * @returns 启动成功返回 Ok，地址无效或系统调用失败返回错误。
+ */
 pub(crate) fn open_url(url: String) -> Result<(), String> {
+    // 先校验协议，再把地址交给操作系统默认浏览器。
     if !(url.starts_with("https://") || url.starts_with("http://")) {
         return Err("只允许打开 HTTP 或 HTTPS 地址".to_owned());
     }
@@ -343,7 +376,9 @@ pub(crate) fn open_url(url: String) -> Result<(), String> {
     #[cfg(target_os = "macos")]
     let result = Command::new("open").arg(&url).status();
     #[cfg(target_os = "windows")]
-    let result = Command::new("cmd").args(["/C", "start", "", &url]).status();
+    let result = background_command("cmd")
+        .args(["/C", "start", "", &url])
+        .status();
     command_result(result)
 }
 

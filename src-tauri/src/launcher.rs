@@ -1,8 +1,10 @@
 use std::{
     collections::HashSet,
     path::{Path, PathBuf},
-    process::Command,
 };
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+use std::process::Command;
 
 #[cfg(target_os = "linux")]
 use std::fs;
@@ -294,9 +296,14 @@ fn platform_applications() -> Vec<AppEntry> {
 }
 
 #[cfg(target_os = "windows")]
-/// 通过 Windows Shell 打开开始菜单快捷方式。
+/**
+ * 通过无控制台的 Windows Shell 打开开始菜单快捷方式。
+ * @param app 已验证的应用入口。
+ * @returns 启动成功返回 Ok，否则返回系统错误。
+ */
 fn platform_launch(app: &AppEntry) -> Result<(), String> {
-    let status = Command::new("cmd")
+    // 仅禁止中转 cmd 的控制台，目标应用的窗口仍由应用自己管理。
+    let status = crate::desktop::background_command("cmd")
         .args(["/C", "start", "", &app.path])
         .status()
         .map_err(|error| format!("无法启动 {}：{error}", app.name))?;
