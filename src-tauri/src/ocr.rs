@@ -9,6 +9,30 @@ use tauri::{
 
 static OCR_BUSY: Mutex<()> = Mutex::new(());
 
+/**
+ * 在用户主动粘贴时读取剪贴板图片，以二进制 PNG 返回给插件。
+ * @param window 请求粘贴图片的已注册插件窗口。
+ * @returns PNG 二进制响应；没有图片时返回明确错误。
+ */
+#[tauri::command]
+pub(crate) async fn plugin_read_clipboard_image(
+    window: WebviewWindow,
+) -> Result<tauri::ipc::Response, String> {
+    require_plugin(&window)?;
+    let data = tauri::async_runtime::spawn_blocking(|| {
+        let image =
+            crate::desktop::read_clipboard_image()?.ok_or_else(|| "剪贴板中没有图片".to_owned())?;
+        let mut png = Cursor::new(Vec::new());
+        image::DynamicImage::ImageRgba8(image)
+            .write_to(&mut png, image::ImageFormat::Png)
+            .map_err(|error| error.to_string())?;
+        Ok::<_, String>(png.into_inner())
+    })
+    .await
+    .map_err(|error| error.to_string())??;
+    Ok(tauri::ipc::Response::new(data))
+}
+
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct OcrResult {

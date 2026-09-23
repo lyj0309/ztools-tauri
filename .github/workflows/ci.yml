@@ -34,6 +34,7 @@ jobs:
           components: clippy,rustfmt
       - uses: Swatinem/rust-cache@v2
         with:
+          cache-on-failure: true
           workspaces: src-tauri -> target
           shared-key: ci
       - name: Install Linux desktop dependencies
@@ -49,10 +50,10 @@ jobs:
         run: cargo fmt --manifest-path src-tauri/Cargo.toml -- --check
       - name: Lint Rust
         run: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --all-features -- -D warnings
-      - name: Test Rust
-        run: cargo test --manifest-path src-tauri/Cargo.toml --all-features
       - name: Test Windows native OCR
         if: runner.os == 'Windows'
         run: cargo test --manifest-path src-tauri/Cargo.toml recognizes_local_fixture -- --ignored
+      - name: Test Rust
+        run: cargo test --manifest-path src-tauri/Cargo.toml --all-features
       - name: Validate compatibility ledger
         run: python3 -m json.tool docs/plugin-api-compatibility.json >/dev/null

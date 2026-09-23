@@ -252,7 +252,10 @@ mod tests {
         assert_eq!(merged.clipboard.len(), 2);
     }
 
-    /// 验证两个独立 SQLite 数据库通过共享文件双向合并新增内容。
+    /**
+     * 验证独立数据库的双向同步，并在清理前释放 Windows 文件句柄。
+     * @returns 无返回值。
+     */
     #[test]
     fn synchronizes_two_device_databases() {
         let root = std::env::temp_dir().join(format!(
@@ -301,6 +304,9 @@ mod tests {
             assert!(contents.contains(&"from device B".to_owned()));
         }
         assert!(shared.join(SYNC_FILE_NAME).is_file());
+        // Windows 不允许删除仍被 SQLite 持有的数据库文件。
+        drop(state_a);
+        drop(state_b);
         fs::remove_dir_all(root).expect("sync fixture should be removable");
     }
 

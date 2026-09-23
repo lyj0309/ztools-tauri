@@ -200,12 +200,29 @@ ui['clear-settings'].addEventListener('click', () => { api.dbStorage.removeItem(
 ui['api-docs'].addEventListener('click', () => { void invoke('plugin_shell_open', { target: 'https://api.fanyi.baidu.com/manage/developer' }).catch(error => status(String(error), true)); });
 ui.file.addEventListener('change', () => { void loadImage(ui.file.files[0]); });
 ui['clear-image'].addEventListener('click', clearImage);
+ui['paste-image'].addEventListener('click', pasteImage);
 document.addEventListener('paste', event => {
     const file = [...(event.clipboardData?.files || [])].find(item => item.type.startsWith('image/'));
     if (file) { event.preventDefault(); void loadImage(file); }
 });
 document.addEventListener('keydown', event => {
+    if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'v' && mode === 'image' && event.target !== ui.appid && event.target !== ui['api-key']) {
+        event.preventDefault(); void pasteImage(); return;
+    }
     if ((event.ctrlKey || event.metaKey) && event.key === 'Enter') { event.preventDefault(); void translate(); }
 });
 api.onPluginEnter(action => { setMode(action.code === 'image' ? 'image' : 'text'); });
 window.addEventListener('beforeunload', () => { if (previewUrl) URL.revokeObjectURL(previewUrl); });
+
+/**
+ * 从原生剪贴板读取图片，兼容不能向网页派发图片粘贴事件的 Webview。
+ * @returns 图片读取与预览完成后的 Promise。
+ */
+async function pasteImage() {
+    if (busy || imageLoading) return;
+    try {
+        const response = await invoke('plugin_read_clipboard_image');
+        const bytes = response instanceof ArrayBuffer ? new Uint8Array(response) : Uint8Array.from(response);
+        await loadImage(new File([bytes], 'clipboard.png', { type: 'image/png' }));
+    } catch (error) { status(String(error), true); }
+}
