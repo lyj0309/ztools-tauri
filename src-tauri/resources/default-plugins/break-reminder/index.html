@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>休息提醒</title>
+    <link rel="stylesheet" href="reminder.css" />
+    <script src="reminder.js" defer></script>
+  </head>
+  <body>
+    <main id="settings-view" class="panel">
+      <div class="eyebrow">ZTOOLS · BREAK REMINDER</div>
+      <h1>休息提醒</h1>
+      <p class="intro">专注一会儿，记得让眼睛和肩膀休息。</p>
+      <label class="toggle-row" for="enabled">
+        <span><strong>启用提醒</strong><small>应用运行时持续计时</small></span>
+        <input id="enabled" type="checkbox" role="switch" />
+      </label>
+      <div class="fields">
+        <label for="interval">每隔 <span class="unit-field"><input id="interval" type="number" min="1" max="480" step="1" inputmode="numeric" /><span>分钟</span></span> 提醒一次</label>
+        <label for="duration">休息提醒显示 <span class="unit-field"><input id="duration" type="number" min="1" max="600" step="1" inputmode="numeric" /><span>秒</span></span></label>
+      </div>
+      <p class="hint">休息开始前 10 秒发送系统通知。关闭此页面后仍会继续提醒。</p>
+      <p id="save-status" class="status" role="status"></p>
+      <div class="actions"><button id="close-settings" type="button">完成</button></div>
+    </main>
+    <main id="break-view" class="panel break-panel" hidden>
+      <div class="eyebrow">TAKE A BREATH</div>
+      <div class="break-symbol" aria-hidden="true">☀</div>
+      <h1>休息一下</h1>
+      <p class="intro">看看远处，放松眼睛和肩膀。</p>
+      <div id="countdown" class="countdown" aria-live="polite"></div>
+      <button id="skip-break" type="button">跳过本次提醒</button>
+    </main>
+  </body>
+</html>

@@ -29,6 +29,27 @@ type BundledPluginFile = (&'static str, &'static [u8]);
 type BundledPlugin = (&'static str, &'static [BundledPluginFile]);
 const BUNDLED_PLUGIN_FILES: &[BundledPlugin] = &[
     (
+        "break-reminder",
+        &[
+            (
+                "plugin.json",
+                include_bytes!("../resources/default-plugins/break-reminder/plugin.json"),
+            ),
+            (
+                "index.html",
+                include_bytes!("../resources/default-plugins/break-reminder/index.html"),
+            ),
+            (
+                "reminder.css",
+                include_bytes!("../resources/default-plugins/break-reminder/reminder.css"),
+            ),
+            (
+                "reminder.js",
+                include_bytes!("../resources/default-plugins/break-reminder/reminder.js"),
+            ),
+        ],
+    ),
+    (
         "baidu-translate",
         &[
             (
@@ -1104,9 +1125,11 @@ pub(crate) fn launch_plugin(
     let preload_adapter = preload_adapter_script(&manifest, &plugin_directory)?;
     let label = plugin_window_label(plugin_name);
     let action_json = serde_json::to_string(&action).map_err(|error| error.to_string())?;
+    let restore_main_on_close = !(plugin_name == "break-reminder" && action.code == "break");
 
     if let Some(window) = app.get_webview_window(&label) {
         // 复用单例窗口时先派发新的进入动作，再恢复窗口焦点。
+        runtime.set_restore_main_on_close(&label, restore_main_on_close)?;
         let payload_paths = plugin_payload_paths(&action.payload);
         if !payload_paths.is_empty() {
             runtime.grant_paths(&label, payload_paths)?;
@@ -1174,6 +1197,10 @@ pub(crate) fn launch_plugin(
 
     // 完成所有可能失败的资源准备后，再发布插件窗口身份和路径权限。
     runtime.register_instance(&label, plugin_name)?;
+    if let Err(error) = runtime.set_restore_main_on_close(&label, restore_main_on_close) {
+        runtime.unregister_instance(&label);
+        return Err(error);
+    }
     let payload_paths = plugin_payload_paths(&action.payload);
     if !payload_paths.is_empty() {
         if let Err(error) = runtime.grant_paths(&label, payload_paths) {
@@ -2290,6 +2317,7 @@ mod tests {
         assert!(plugins.iter().any(|plugin| plugin.name == "setting"));
         assert!(plugins.iter().any(|plugin| plugin.name == "system"));
         assert!(plugins.iter().any(|plugin| plugin.name == "screenshot"));
+        assert!(plugins.iter().any(|plugin| plugin.name == "break-reminder"));
         assert!(plugins
             .iter()
             .any(|plugin| plugin.name == "baidu-translate"));

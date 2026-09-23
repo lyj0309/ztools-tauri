@@ -6,7 +6,7 @@ on:
       release_tag:
         description: Release tag whose portable executable is tested
         required: true
-        default: v0.1.16
+        default: v0.1.17
 
 permissions:
   contents: read
@@ -25,12 +25,17 @@ jobs:
       - name: Download released portable executable
         shell: pwsh
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           RELEASE_TAG: ${{ inputs.release_tag }}
         run: |
+          $ErrorActionPreference = 'Stop'
           New-Item -ItemType Directory -Force artifacts | Out-Null
           $asset = "ZTools_$($env:RELEASE_TAG)_windows_x64_portable.exe"
-          gh release download $env:RELEASE_TAG --pattern $asset --dir artifacts
+          # 使用稳定的文件地址，避免 Release 元数据缓存指向被重传后已删除的 asset ID。
+          $downloadUrl = "https://github.com/$($env:GITHUB_REPOSITORY)/releases/download/$($env:RELEASE_TAG)/$asset"
+          Invoke-WebRequest -Uri $downloadUrl -OutFile "artifacts/$asset"
+          if ((Get-Item "artifacts/$asset").Length -lt 1MB) {
+            throw 'Portable executable download is unexpectedly small'
+          }
           Get-FileHash "artifacts/$asset" -Algorithm SHA256 |
             Select-Object Algorithm, Hash, Path |
             ConvertTo-Json | Set-Content artifacts/release-hash.json
@@ -219,11 +224,15 @@ jobs:
             launcherVisible = $false
             editorVisible = $false
             pinVisible = $false
+            breakSettingsVisible = $false
+            breakSkipClosedWindow = $false
           }
 
           $launcherProcess = $null
           $screenshotProcess = $null
           $historyProcess = $null
+          $breakSettingsProcess = $null
+          $breakProcess = $null
           try {
             Remove-Item Env:ZTOOLS_E2E_PLUGIN_NAME -ErrorAction SilentlyContinue
             Remove-Item Env:ZTOOLS_E2E_PLUGIN_FEATURE -ErrorAction SilentlyContinue
@@ -358,6 +367,43 @@ jobs:
             }
             $diagnostics.historyImagePinned = $true
             Save-DesktopScreenshot -Path 'artifacts/08-history-pin.png'
+
+            if ([version]$env:RELEASE_TAG.TrimStart('v') -ge [version]'0.1.17') {
+              # 从便携版打开内置休息提醒，页面完成 JS 布局后才能达到目标尺寸。
+              Stop-TestProcess -Process $historyProcess
+              $env:ZTOOLS_E2E_PLUGIN_NAME = 'break-reminder'
+              $env:ZTOOLS_E2E_PLUGIN_FEATURE = 'settings'
+              $breakSettingsProcess = Start-Process -FilePath $executable -PassThru `
+                -RedirectStandardOutput 'artifacts/break-settings-stdout.log' `
+                -RedirectStandardError 'artifacts/break-settings-stderr.log'
+              $settingsWindow = Wait-WindowByTitleNearSize -Title '休息提醒' `
+                -ExpectedWidth 540 -ExpectedHeight 570 -Tolerance 80
+              $diagnostics.breakSettingsVisible = $true
+              Save-DesktopScreenshot -Path 'artifacts/10-break-settings.png'
+              Stop-TestProcess -Process $breakSettingsProcess
+              Start-Sleep -Seconds 2
+
+              # 单独打开休息页，用真实按键触发唯一的“跳过本次提醒”按钮。
+              $env:ZTOOLS_E2E_PLUGIN_FEATURE = 'break'
+              $env:ZTOOLS_E2E_PLUGIN_PAYLOAD = '{"durationSeconds":120}'
+              $breakProcess = Start-Process -FilePath $executable -PassThru `
+                -RedirectStandardOutput 'artifacts/break-stdout.log' `
+                -RedirectStandardError 'artifacts/break-stderr.log'
+              $breakWindow = Wait-WindowByTitleNearSize -Title '休息提醒' `
+                -ExpectedWidth 440 -ExpectedHeight 400 -Tolerance 80
+              Save-DesktopScreenshot -Path 'artifacts/11-break-reminder.png'
+              [DesktopNative]::SetForegroundWindow($breakWindow) | Out-Null
+              [DesktopNative]::keybd_event(0x09, 0, 0, [UIntPtr]::Zero)
+              [DesktopNative]::keybd_event(0x09, 0, 0x0002, [UIntPtr]::Zero)
+              [DesktopNative]::keybd_event(0x0D, 0, 0, [UIntPtr]::Zero)
+              [DesktopNative]::keybd_event(0x0D, 0, 0x0002, [UIntPtr]::Zero)
+              Start-Sleep -Seconds 2
+              if ([DesktopNative]::IsWindowVisible($breakWindow)) {
+                throw 'Skip button did not close the break reminder'
+              }
+              $diagnostics.breakSkipClosedWindow = $true
+              Save-DesktopScreenshot -Path 'artifacts/12-break-skipped.png'
+            }
           } catch {
             $diagnostics.error = $_.Exception.Message
             Save-DesktopScreenshot -Path 'artifacts/99-error.png'
@@ -367,6 +413,8 @@ jobs:
             Stop-TestProcess -Process $launcherProcess
             Stop-TestProcess -Process $screenshotProcess
             Stop-TestProcess -Process $historyProcess
+            Stop-TestProcess -Process $breakSettingsProcess
+            Stop-TestProcess -Process $breakProcess
           }
 
       - name: Upload Windows desktop evidence

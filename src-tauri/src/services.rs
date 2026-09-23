@@ -9,7 +9,9 @@ use std::{
 
 use tauri::{AppHandle, Emitter, Manager};
 
-use crate::{commands::launcher::current_timestamp, desktop, launcher, state::AppState, sync};
+use crate::{
+    break_reminder, commands::launcher::current_timestamp, desktop, launcher, state::AppState, sync,
+};
 
 pub(crate) struct BackgroundServices {
     stop: Arc<AtomicBool>,
@@ -23,6 +25,7 @@ impl BackgroundServices {
         let workers = vec![
             start_clipboard_monitor(app.clone(), stop.clone()),
             start_sync_scheduler(app.clone(), stop.clone()),
+            break_reminder::start(app.clone(), stop.clone()),
             start_application_scanner(app, stop.clone()),
         ];
         Self {
