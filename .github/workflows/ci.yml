@@ -53,6 +53,19 @@ jobs:
       - name: Test Windows native OCR
         if: runner.os == 'Windows'
         run: cargo test --manifest-path src-tauri/Cargo.toml recognizes_local_fixture -- --ignored
+      - name: Test Windows ML OCR with downloaded tiny models
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $installer = Join-Path $env:RUNNER_TEMP 'WindowsAppRuntimeInstall-x64.exe'
+          Invoke-WebRequest 'https://aka.ms/windowsappsdk/1.8/1.8.250916003/windowsappruntimeinstall-x64.exe' -OutFile $installer
+          & $installer --quiet
+          if ($LASTEXITCODE -ne 0) { throw "Windows App Runtime installer failed: $LASTEXITCODE" }
+          $env:ZTOOLS_E2E = '1'
+          $env:ZTOOLS_DATA_ROOT = Join-Path $env:RUNNER_TEMP 'ztools-ocr-data'
+          cargo test --manifest-path src-tauri/Cargo.toml recognizes_with_windows_ml_fixture -- --ignored --nocapture
+          if ($LASTEXITCODE -ne 0) { throw "Windows ML OCR fixture failed: $LASTEXITCODE" }
       - name: Test Rust
         run: cargo test --manifest-path src-tauri/Cargo.toml --all-features
       - name: Validate compatibility ledger

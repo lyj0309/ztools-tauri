@@ -19,6 +19,8 @@ const DET_URL: &str = "https://paddle-model-ecology.bj.bcebos.com/paddlex/offici
 const REC_URL: &str = "https://paddle-model-ecology.bj.bcebos.com/paddlex/official_inference_model/paddle3.0.0/tmp/PP-OCRv6_tiny_rec_0515_onnx.tar";
 const DET_SHA256: &str = "220c0bd1074bd9415434f8b08339bb559c41a2ffd33c3ea34ded6a5fc63158b6";
 const REC_SHA256: &str = "71a9a34ee45cb376cfdf8a849eb0cc66755e59baaccb6b94045d9ba6e5b6d012";
+const DET_ONNX_SHA256: &str = "a56a3430a96a6c691f8bfbbb297208bb9573c3d70083d6382071cbd92d0a152e";
+const REC_ONNX_SHA256: &str = "d5de4cb712dc90158c4f966e7ed25b87b5d16a1ab7c8e14b9f9c2b4aa269dd36";
 const DET_PREFIX: &str = "PP-OCRv6_tiny_det_onnx";
 const REC_PREFIX: &str = "PP-OCRv6_tiny_rec_0515_onnx";
 static WINDOWS_ML_READY: OnceLock<bool> = OnceLock::new();
@@ -132,7 +134,17 @@ pub(crate) async fn ensure_models(window: &WebviewWindow) -> Result<ModelPaths, 
     }
     .join("ocr")
     .join("ppocrv6-tiny");
-    fs::create_dir_all(&root).map_err(|error| error.to_string())?;
+    ensure_models_in(&root).await
+}
+
+/**
+ * 在给定缓存目录准备官方 tiny 模型，供桌面调用和隔离测试复用。
+ * @param root 模型缓存目录。
+ * @returns 三个推理文件路径。
+ * @throws 下载、解包或缓存失败。
+ */
+async fn ensure_models_in(root: &Path) -> Result<ModelPaths, String> {
+    fs::create_dir_all(root).map_err(|error| error.to_string())?;
     let det = root.join("det.onnx");
     let rec = root.join("rec.onnx");
     let yml = root.join("rec.yml");
@@ -165,14 +177,24 @@ pub(crate) async fn ensure_models(window: &WebviewWindow) -> Result<ModelPaths, 
  * @param rec 识别模型路径。
  * @param yml 识别模型配置路径。
  * @param dict 字符字典路径。
- * @returns 四个文件均非空时为真。
+ * @returns 模型哈希匹配且配置、字典非空时为真。
  */
 fn valid_model_cache(det: &Path, rec: &Path, yml: &Path, dict: &Path) -> bool {
-    [det, rec, yml, dict].iter().all(|path| {
-        fs::metadata(path)
-            .map(|meta| meta.len() > 0)
-            .unwrap_or(false)
-    })
+    // 每次复用前检查模型哈希，以便自动修复不完整或被改写的缓存。
+    let model_matches =
+        [(det, DET_ONNX_SHA256), (rec, REC_ONNX_SHA256)]
+            .iter()
+            .all(|(path, expected)| {
+                fs::read(path)
+                    .map(|bytes| format!("{:x}", Sha256::digest(bytes)) == *expected)
+                    .unwrap_or(false)
+            });
+    model_matches
+        && [yml, dict].iter().all(|path| {
+            fs::metadata(path)
+                .map(|meta| meta.len() > 0)
+                .unwrap_or(false)
+        })
 }
 
 /**
@@ -299,8 +321,10 @@ pub(crate) fn recognize(
     paths: ModelPaths,
 ) -> Result<OcrResult, String> {
     let mut ocr = OcrLite::new();
-    let path = |value: &Path| value.to_str().ok_or_else(|| "OCR 模型路径无效".to_owned());
-    ocr.init_models_no_angle(path(&paths.det)?, path(&paths.rec)?, path(&paths.dict)?, 2)
+    let det = paths.det.to_str().ok_or("OCR 检测模型路径无效")?;
+    let rec = paths.rec.to_str().ok_or("OCR 识别模型路径无效")?;
+    let dict = paths.dict.to_str().ok_or("OCR 字典路径无效")?;
+    ocr.init_models_no_angle(det, rec, dict, 2)
         .map_err(|error| error.to_string())?;
     let image = image.thumbnail(4096, 4096).to_rgb8();
     let recognized = ocr
@@ -316,4 +340,25 @@ pub(crate) fn recognize(
         language: language.to_owned(),
         engine: "Windows ML · PP-OCRv6 tiny",
     })
+}
+
+#[cfg(test)]
+mod tests {
+    /**
+     * 在真实 Windows App Runtime 上下载官方模型并识别固定截图。
+     * @returns 无返回值。
+     */
+    #[test]
+    #[ignore = "requires Windows App Runtime 1.8.1+ and first-use network download"]
+    fn recognizes_with_windows_ml_fixture() {
+        super::initialize();
+        assert!(super::is_available(), "Windows ML runtime was not loaded");
+        let root = std::env::temp_dir().join(format!("ztools-ocr-ml-test-{}", std::process::id()));
+        let paths = tauri::async_runtime::block_on(super::ensure_models_in(&root)).unwrap();
+        let image = image::load_from_memory(include_bytes!("../tests/fixtures/ocr.png")).unwrap();
+        let result = super::recognize(image, "en-US", paths).unwrap();
+        assert!(result.text.contains("ZTOOLS"), "{}", result.text);
+        assert!(result.text.contains("2026"), "{}", result.text);
+        std::fs::remove_dir_all(root).unwrap();
+    }
 }
