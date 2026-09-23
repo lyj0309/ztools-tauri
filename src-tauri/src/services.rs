@@ -81,7 +81,12 @@ impl Drop for BackgroundServices {
     }
 }
 
-/// 启动独立剪贴板轮询线程，变化时持久化并通知前端。
+/**
+ * 监控文本及图片剪贴板，在内容变化时保存历史。
+ * @param app 桌面宿主句柄。
+ * @param stop 退出信号。
+ * @returns 后台监控线程句柄。
+ */
 fn start_clipboard_monitor(app: AppHandle, stop: Arc<AtomicBool>) -> JoinHandle<()> {
     thread::Builder::new()
         .name("ztools-clipboard-monitor".to_owned())
@@ -98,6 +103,7 @@ fn start_clipboard_monitor(app: AppHandle, stop: Arc<AtomicBool>) -> JoinHandle<
                     .as_ref()
                     .is_some_and(|settings| settings.clipboard_monitoring)
                 {
+                    let _ = crate::clipboard_images::capture_current(&app);
                     last_content.clear();
                     sleep_interruptibly(&stop, Duration::from_millis(700));
                     continue;
@@ -125,6 +131,8 @@ fn start_clipboard_monitor(app: AppHandle, stop: Arc<AtomicBool>) -> JoinHandle<
                         last_content = content;
                     }
                 }
+                // 原图编码运行在后台线程，图片历史通过独立选择页按需读取。
+                let _ = crate::clipboard_images::capture_current(&app);
                 sleep_interruptibly(&stop, Duration::from_millis(700));
             }
         })

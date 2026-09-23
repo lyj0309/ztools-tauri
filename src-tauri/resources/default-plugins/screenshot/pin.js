@@ -5,6 +5,8 @@ if (!root)
 root.innerHTML = `
   <img class="pin-image" alt="悬浮截图" draggable="false" />
   <div class="pin-controls">
+    <button type="button" data-action="smaller" title="等比缩小，也可向下滚动">−</button>
+    <button type="button" data-action="larger" title="等比放大，也可向上滚动">+</button>
     <button type="button" data-action="copy" title="复制 Ctrl+C">复制</button>
     <button type="button" data-action="save" title="保存 Ctrl+S">保存</button>
     <button type="button" data-action="close" title="关闭 Esc">×</button>
@@ -16,6 +18,42 @@ const controls = root.querySelector('.pin-controls');
 const message = root.querySelector('.pin-message');
 let sourceUrl = '';
 let busy = false;
+let resizing = false;
+let resizeSteps = 0;
+root.title = '拖动移动 · 滚轮等比缩放 · Esc 关闭';
+
+/**
+ * 串行应用滚轮步长，避免并发缩放使用过期的窗口尺寸。
+ * @param steps 正数放大，负数缩小。
+ * @returns 缩放队列清空后的 Promise。
+ */
+async function resizePin(steps) {
+    resizeSteps = Math.max(-6, Math.min(6, resizeSteps + steps));
+    if (resizing) return;
+    resizing = true;
+    try {
+        while (resizeSteps !== 0) {
+            const current = resizeSteps;
+            resizeSteps = 0;
+            await invoke('screenshot_pin_resize', { factor: Math.pow(1.1, current) });
+        }
+    } catch (error) {
+        resizeSteps = 0;
+        showMessage(String(error), true);
+    } finally {
+        resizing = false;
+    }
+}
+
+/**
+ * 使用滚轮等比缩放图片和窗口。
+ * @param event 滚轮事件。
+ * @returns 无返回值。
+ */
+function handleWheel(event) {
+    event.preventDefault();
+    if (event.deltaY !== 0) void resizePin(event.deltaY < 0 ? 1 : -1);
+}
 /**
  * 把 Tauri 原始响应统一转换为图片字节。
  * @param value IPC 返回的 ArrayBuffer 或数字数组。
@@ -79,6 +117,8 @@ function handleControlsClick(event) {
     const action = button?.dataset.action;
     if (action === 'copy' || action === 'save' || action === 'close')
         void runAction(action);
+    else if (action === 'smaller' || action === 'larger')
+        void resizePin(action === 'larger' ? 1 : -1);
 }
 /**
  * 在图片区域按下主键时交给系统拖动无边框窗口。
@@ -125,10 +165,13 @@ async function initialize() {
         await invoke('screenshot_pin_ready');
     }
     catch (error) {
+        // 初始化失败时仍提供可关闭的错误窗口，避免隐藏的贴图会话残留。
+        await invoke('screenshot_pin_ready').catch(() => undefined);
         showMessage(`贴图加载失败：${String(error)}`, true);
     }
 }
 root.addEventListener('pointerdown', handlePointerDown);
+root.addEventListener('wheel', handleWheel, { passive: false });
 controls.addEventListener('click', handleControlsClick);
 window.addEventListener('keydown', handleKeyboard);
 window.addEventListener('contextmenu', (event) => event.preventDefault());

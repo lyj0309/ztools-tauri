@@ -1,14 +1,19 @@
 {
   "name": "screenshot",
-  "title": "截图与贴图",
+  "title": "截图",
   "description": "ZTools 内置选区截图、编辑标注和悬浮贴图插件",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "main": "index.html",
   "features": [
     {
       "code": "capture",
       "explain": "选区截图、编辑标注和悬浮贴图",
-      "cmds": ["截图", "截屏", "贴图", "Screenshot", "Screen Capture"]
+      "cmds": ["截图", "截屏", "Screenshot", "Screen Capture"]
+    },
+    {
+      "code": "pin",
+      "explain": "贴图 · 选择剪贴板历史图片",
+      "cmds": ["贴图", "Pin", "图片贴图"]
     }
   ]
 }

@@ -40,6 +40,16 @@ pub(crate) struct ClipboardEntry {
     pub(crate) captured_at: i64,
 }
 
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ClipboardImageEntry {
+    pub(crate) id: i64,
+    pub(crate) width: u32,
+    pub(crate) height: u32,
+    pub(crate) captured_at: i64,
+    pub(crate) thumbnail: String,
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(default, rename_all = "camelCase")]
 pub(crate) struct LauncherSettings {

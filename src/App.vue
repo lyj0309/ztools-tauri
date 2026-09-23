@@ -1500,7 +1500,7 @@ onUnmounted(() => {
               <template v-else>{{ result.plugin.title.slice(0, 1).toLocaleUpperCase() }}</template>
             </span>
             <span class="app-copy">
-              <strong>{{ result.plugin.title }}</strong>
+              <strong>{{ result.plugin.name === 'screenshot' && result.featureCode === 'pin' ? '贴图' : result.plugin.title }}</strong>
               <small>{{ result.explain }} · {{ result.featureCode }}</small>
             </span>
             <span class="row-status">插件指令</span>

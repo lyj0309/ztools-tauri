@@ -11,6 +11,59 @@ use tauri::{AppHandle, Manager, PhysicalPosition, PhysicalSize};
 
 static SYSTEM_CLIPBOARD: Mutex<Option<arboard::Clipboard>> = Mutex::new(None);
 
+/**
+ * 读取系统剪贴板 RGBA 图片并限制可接受的像素体积。
+ * @returns 当前图片；剪贴板不是图片时返回 None，系统读取失败返回错误。
+ */
+pub(crate) fn read_clipboard_image() -> Result<Option<image::RgbaImage>, String> {
+    let mut guard = system_clipboard()?;
+    let clipboard = guard
+        .as_mut()
+        .ok_or_else(|| "系统剪贴板不可用".to_owned())?;
+    let value = match clipboard.get_image() {
+        Ok(value) => value,
+        Err(arboard::Error::ContentNotAvailable) => return Ok(None),
+        Err(error) => return Err(error.to_string()),
+    };
+    // 限制像素数量，避免图片解码、缩略图和原图编码同时占用过多内存。
+    if value.width == 0
+        || value.height == 0
+        || value.width > 16384
+        || value.height > 16384
+        || value.width.saturating_mul(value.height) > 32_000_000
+    {
+        return Err("剪贴板图片尺寸过大".to_owned());
+    }
+    image::RgbaImage::from_raw(
+        value.width as u32,
+        value.height as u32,
+        value.bytes.into_owned(),
+    )
+    .map(Some)
+    .ok_or_else(|| "剪贴板图片像素无效".to_owned())
+}
+
+/**
+ * 获取 Windows 剪贴板变更序号，其他平台由内容哈希判断变化。
+ * @returns Windows 变更序号或 None。
+ */
+pub(crate) fn clipboard_sequence() -> Option<u32> {
+    #[cfg(target_os = "windows")]
+    {
+        #[link(name = "user32")]
+        extern "system" {
+            fn GetClipboardSequenceNumber() -> u32;
+        }
+        // 该 Win32 API 无指针参数，不打开或修改剪贴板。
+        let sequence = unsafe { GetClipboardSequenceNumber() };
+        (sequence != 0).then_some(sequence)
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        None
+    }
+}
+
 #[cfg(target_os = "windows")]
 /**
  * 构造不分配控制台窗口的 Windows 后台命令。

@@ -19,6 +19,7 @@ use tauri::{
 use crate::desktop;
 
 const EDITOR_LABEL: &str = "plugin-screenshot";
+const HISTORY_LABEL: &str = "plugin-screenshot-history";
 const PIN_LABEL_PREFIX: &str = "plugin-screenshot-pin-";
 const MAX_SCREENSHOT_BYTES: usize = 64 * 1024 * 1024;
 
@@ -114,7 +115,12 @@ pub(crate) struct ScreenshotEditorInfo {
     height: u32,
 }
 
-/// 隐藏主窗口、截取鼠标所在显示器并打开选区编辑器。
+/**
+ * 无过渡隐藏启动器，截取固定显示器并打开选区编辑器。
+ * @param app 桌面宿主句柄。
+ * @param main 发起截图的启动器窗口。
+ * @returns 编辑器创建结果，抓屏失败时恢复启动器。
+ */
 pub(crate) async fn start_editor(app: AppHandle, main: WebviewWindow) -> Result<(), String> {
     if main.label() != "main" {
         return Err("只有主启动器可以发起截图".to_owned());
@@ -126,15 +132,19 @@ pub(crate) async fn start_editor(app: AppHandle, main: WebviewWindow) -> Result<
     let monitor = active_monitor(&app)?;
     let monitor_position = *monitor.position();
     let monitor_size = *monitor.size();
-    main.hide().map_err(|error| error.to_string())?;
+    // 隐藏启动器时关闭系统过渡，不再固定停顿等待动画结束。
+    set_window_transitions(&main, false)?;
+    let hidden = main.hide().map_err(|error| error.to_string());
+    let _ = set_window_transitions(&main, true);
+    hidden?;
 
     let runtime = app.state::<ScreenshotRuntime>();
     let source = temporary_path(&app, "editor", runtime.next_id())?;
     let capture_app = app.clone();
     let capture_source = source.clone();
     let capture_result = tauri::async_runtime::spawn_blocking(move || {
-        // 给窗口管理器留出一帧隐藏主窗口，避免把启动器截进背景。
-        std::thread::sleep(std::time::Duration::from_millis(220));
+        // Windows 只等待桌面合成提交隐藏结果，不引入人为过渡时长。
+        flush_capture_frame();
         desktop::capture_display_to(
             &capture_app,
             &capture_source,
@@ -185,6 +195,9 @@ pub(crate) async fn start_editor(app: AppHandle, main: WebviewWindow) -> Result<
             monitor_position.y,
         ))
         .and_then(|_| editor.set_size(PhysicalSize::new(monitor_size.width, monitor_size.height)));
+    let prepare_result = prepare_result
+        .map_err(|error| error.to_string())
+        .and_then(|_| set_window_transitions(&editor, false));
     if let Err(error) = prepare_result {
         // 创建后的任一步失败都销毁半成品窗口并恢复启动器。
         let _ = editor.close();
@@ -275,7 +288,13 @@ pub(crate) async fn screenshot_copy(
     finish_editor(&app, &window, "copied", None, false)
 }
 
-/// 用编辑后的 PNG 创建无边框置顶贴图窗口并关闭编辑器。
+/**
+ * 将编辑器的二进制 PNG 发布为等比缩放贴图并结束选区编辑。
+ * @param request PNG 请求体和物理选区坐标请求头。
+ * @param app 桌面宿主句柄。
+ * @param window 发起操作的编辑器窗口。
+ * @returns 贴图创建与编辑器关闭的结果。
+ */
 #[tauri::command]
 pub(crate) async fn screenshot_pin(
     request: Request<'_>,
@@ -291,12 +310,40 @@ pub(crate) async fn screenshot_pin(
     if !x.is_finite() || !y.is_finite() || !width.is_finite() || !height.is_finite() {
         return Err("贴图位置或尺寸无效".to_owned());
     }
-    let width = width.round().clamp(80.0, 16_384.0) as u32;
-    let height = height.round().clamp(60.0, 16_384.0) as u32;
+    let width = width.round().clamp(1.0, 16_384.0) as u32;
+    let height = height.round().clamp(1.0, 16_384.0) as u32;
+    let editor_position = window.outer_position().map_err(|error| error.to_string())?;
+    create_pin(
+        &app,
+        data,
+        PhysicalPosition::new(
+            editor_position.x.saturating_add(x.round() as i32),
+            editor_position.y.saturating_add(y.round() as i32),
+        ),
+        PhysicalSize::new(width, height),
+    )
+    .await?;
+    finish_editor(&app, &window, "pinned", None, false)
+}
+
+/**
+ * 创建保持原图比例、使用滚轮缩放的悬浮窗口。
+ * @param app 桌面宿主句柄。
+ * @param data PNG 原图。
+ * @param position 贴图左上角物理位置。
+ * @param size 贴图初始物理尺寸。
+ * @returns 创建成功返回 Ok，否则回收窗口并返回错误。
+ */
+async fn create_pin(
+    app: &AppHandle,
+    data: Vec<u8>,
+    position: PhysicalPosition<i32>,
+    size: PhysicalSize<u32>,
+) -> Result<(), String> {
     let runtime = app.state::<ScreenshotRuntime>();
     let id = runtime.next_id();
     let label = format!("{PIN_LABEL_PREFIX}{id}");
-    let path = temporary_path(&app, "pin", id)?;
+    let path = temporary_path(app, "pin", id)?;
     let write_path = path.clone();
     tauri::async_runtime::spawn_blocking(move || {
         // 校验和写盘在阻塞线程完成，防止大选区冻结 WebView2 窗口。
@@ -307,18 +354,14 @@ pub(crate) async fn screenshot_pin(
     .map_err(|error| format!("贴图创建任务异常结束：{error}"))??;
     runtime.register_pin(label.clone(), path.clone())?;
 
-    let editor_position = window.outer_position().map_err(|error| error.to_string())?;
-    let pin_x = editor_position.x + x.round() as i32;
-    let pin_y = editor_position.y + y.round() as i32;
-    let build_result = WebviewWindowBuilder::new(&app, &label, plugin_url("pin.html")?)
+    let build_result = WebviewWindowBuilder::new(app, &label, plugin_url("pin.html")?)
         .title("ZTools 贴图")
         .decorations(false)
-        .resizable(true)
+        .resizable(false)
         .always_on_top(true)
         .skip_taskbar(true)
         .visible(false)
-        .inner_size(f64::from(width), f64::from(height))
-        .min_inner_size(80.0, 60.0)
+        .inner_size(f64::from(size.width), f64::from(size.height))
         .build();
     let pin = match build_result {
         Ok(pin) => pin,
@@ -338,15 +381,269 @@ pub(crate) async fn screenshot_pin(
         }
     });
     if let Err(error) = pin
-        .set_position(PhysicalPosition::new(pin_x, pin_y))
-        .and_then(|_| pin.set_size(PhysicalSize::new(width, height)))
+        .set_position(position)
+        .and_then(|_| pin.set_size(size))
+        .map_err(|error| error.to_string())
+        .and_then(|_| set_window_transitions(&pin, false))
     {
         // 贴图未能显示时回收动态窗口及其临时文件。
         let _ = pin.close();
-        cleanup_pin(&app, &label);
+        cleanup_pin(app, &label);
         return Err(error.to_string());
     }
-    finish_editor(&app, &window, "pinned", None, false)
+    Ok(())
+}
+
+/**
+ * 按原图比例计算限制范围内的窗口尺寸。
+ * @param width 原图宽度。
+ * @param height 原图高度。
+ * @param target_width 希望显示的宽度。
+ * @returns 同比例物理尺寸，最短边至少一像素。
+ */
+fn proportional_size(width: u32, height: u32, target_width: f64) -> PhysicalSize<u32> {
+    let ratio = (target_width.max(1.0) / f64::from(width.max(1)))
+        .min(16384.0 / f64::from(width.max(height).max(1)));
+    PhysicalSize::new(
+        (f64::from(width) * ratio).round().max(1.0) as u32,
+        (f64::from(height) * ratio).round().max(1.0) as u32,
+    )
+}
+
+/**
+ * 按滚轮倍率等比缩放当前贴图。
+ * @param factor 单次缩放倍率。
+ * @param app 桌面宿主句柄。
+ * @param window 发起缩放的贴图窗口。
+ * @returns 调整结束后的结果。
+ */
+#[tauri::command]
+pub(crate) async fn screenshot_pin_resize(
+    factor: f64,
+    app: AppHandle,
+    window: WebviewWindow,
+) -> Result<(), String> {
+    require_pin(&window)?;
+    if !factor.is_finite() || !(0.5..=2.0).contains(&factor) {
+        return Err("贴图缩放倍率无效".to_owned());
+    }
+    let path = app.state::<ScreenshotRuntime>().pin_path(window.label())?;
+    let (width, height) = image::image_dimensions(path).map_err(|error| error.to_string())?;
+    let current = window.inner_size().map_err(|error| error.to_string())?;
+    // 只改变一个缩放倍率，宽高始终从原图尺寸推导，不积累多次缩放的比例误差。
+    let size = proportional_size(
+        width,
+        height,
+        (f64::from(current.width) * factor).clamp(32.0, 8192.0),
+    );
+    window.set_size(size).map_err(|error| error.to_string())
+}
+
+/**
+ * 设置 Windows 窗口的系统显示隐藏过渡，其他平台保持立即显示逻辑。
+ * @param window 需要调整的窗口。
+ * @param enabled 是否允许系统过渡。
+ * @returns 设置结果。
+ */
+fn set_window_transitions(window: &WebviewWindow, enabled: bool) -> Result<(), String> {
+    #[cfg(target_os = "windows")]
+    {
+        use std::ffi::c_void;
+        #[link(name = "dwmapi")]
+        extern "system" {
+            fn DwmSetWindowAttribute(
+                hwnd: *mut c_void,
+                attribute: u32,
+                value: *const c_void,
+                size: u32,
+            ) -> i32;
+        }
+        let disabled = i32::from(!enabled);
+        let hwnd = window.hwnd().map_err(|error| error.to_string())?;
+        // DWMWA_TRANSITIONS_FORCEDISABLED=3；传入有效 HWND 和四字节 BOOL。
+        unsafe {
+            DwmSetWindowAttribute(
+                hwnd.0 as *mut c_void,
+                3,
+                &disabled as *const i32 as *const c_void,
+                4,
+            );
+        }
+    }
+    #[cfg(not(target_os = "windows"))]
+    let _ = (window, enabled);
+    Ok(())
+}
+
+/**
+ * 等待 Windows 桌面合成完成当前帧，不附加固定延迟。
+ * @returns 无返回值。
+ */
+fn flush_capture_frame() {
+    #[cfg(target_os = "windows")]
+    {
+        #[link(name = "dwmapi")]
+        extern "system" {
+            fn DwmFlush() -> i32;
+        }
+        // DwmFlush 不接收指针，等待合成器提交启动器隐藏这一帧。
+        unsafe {
+            DwmFlush();
+        }
+    }
+}
+
+/**
+ * 打开默认截图插件内的历史图片选择页。
+ * @param app 桌面宿主句柄。
+ * @param main 发起操作的启动器窗口。
+ * @returns 选择窗口创建完成后的结果。
+ */
+pub(crate) async fn start_history(app: AppHandle, main: WebviewWindow) -> Result<(), String> {
+    if main.label() != "main" {
+        return Err("只有启动器可以打开图片历史".to_owned());
+    }
+    if let Some(existing) = app.get_webview_window(HISTORY_LABEL) {
+        existing
+            .show()
+            .and_then(|_| existing.set_focus())
+            .map_err(|e| e.to_string())?;
+        return main.hide().map_err(|e| e.to_string());
+    }
+    let monitor = active_monitor(&app)?;
+    let scale = monitor.scale_factor();
+    let width = (680.0 * scale).min(f64::from(monitor.size().width));
+    let height = (480.0 * scale).min(f64::from(monitor.size().height));
+    let picker = WebviewWindowBuilder::new(&app, HISTORY_LABEL, plugin_url("history.html")?)
+        .title("ZTools 贴图 · 历史图片")
+        .decorations(false)
+        .resizable(false)
+        .always_on_top(true)
+        .skip_taskbar(true)
+        .visible(false)
+        .inner_size(width / scale, height / scale)
+        .build()
+        .map_err(|e| e.to_string())?;
+    let prepared = picker
+        .set_position(PhysicalPosition::new(
+            monitor.position().x + ((f64::from(monitor.size().width) - width) / 2.0) as i32,
+            monitor.position().y + ((f64::from(monitor.size().height) - height) / 2.0) as i32,
+        ))
+        .map_err(|e| e.to_string())
+        .and_then(|_| set_window_transitions(&picker, false));
+    if let Err(error) = prepared {
+        let _ = picker.close();
+        return Err(error);
+    }
+    // 图片列表加载前即可显示空状态，窗口本身不做淡入淡出。
+    main.hide().map_err(|e| e.to_string())?;
+    if let Err(error) = picker.show().and_then(|_| picker.set_focus()) {
+        let _ = picker.close();
+        crate::commands::launcher::show_main_window(&app);
+        return Err(error.to_string());
+    }
+    Ok(())
+}
+
+/**
+ * 验证调用者为历史图片选择页。
+ * @param window 当前调用窗口。
+ * @returns 身份匹配返回 Ok，否则拒绝访问图片历史。
+ */
+fn require_history(window: &WebviewWindow) -> Result<(), String> {
+    if window.label() == HISTORY_LABEL {
+        Ok(())
+    } else {
+        Err("当前窗口不是图片历史选择页".to_owned())
+    }
+}
+
+/**
+ * 捕获当前图片并返回本地历史预览。
+ * @param app 桌面宿主句柄。
+ * @param window 图片选择页窗口。
+ * @returns 历史图片元数据和缩略图列表。
+ */
+#[tauri::command]
+pub(crate) async fn screenshot_history_list(
+    app: AppHandle,
+    window: WebviewWindow,
+) -> Result<Vec<crate::models::ClipboardImageEntry>, String> {
+    require_history(&window)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        // 临时剪贴板占用不妨碍读取已经保存的历史。
+        let _ = crate::clipboard_images::capture_current(&app);
+        let state = app.state::<crate::state::AppState>();
+        let store = state.store.lock().map_err(|e| e.to_string())?;
+        let settings = store.settings()?;
+        store.prune_clipboard(
+            settings.clipboard_retention_days,
+            crate::commands::launcher::current_timestamp()?,
+        )?;
+        store.clipboard_images()
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/**
+ * 把选中的历史原图显示为悬浮贴图，初始尺寸适配选择页所在屏幕。
+ * @param id 历史图片标识。
+ * @param app 桌面宿主句柄。
+ * @param window 图片选择页窗口。
+ * @returns 贴图窗口创建及选择页关闭后的结果。
+ */
+#[tauri::command]
+pub(crate) async fn screenshot_history_pin(
+    id: i64,
+    app: AppHandle,
+    window: WebviewWindow,
+) -> Result<(), String> {
+    require_history(&window)?;
+    let read_app = app.clone();
+    let (data, width, height) = tauri::async_runtime::spawn_blocking(move || {
+        let data = read_app
+            .state::<crate::state::AppState>()
+            .store
+            .lock()
+            .map_err(|e| e.to_string())?
+            .clipboard_image_png(id)?;
+        let image = decode_png(&data)?;
+        Ok::<_, String>((data, image.width(), image.height()))
+    })
+    .await
+    .map_err(|e| e.to_string())??;
+    let monitor = window
+        .current_monitor()
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| "无法获取贴图所在显示器".to_owned())?;
+    let scale = (f64::from(monitor.size().width) * 0.8 / f64::from(width))
+        .min(f64::from(monitor.size().height) * 0.8 / f64::from(height))
+        .min(1.0);
+    let size = proportional_size(width, height, f64::from(width) * scale);
+    let position = PhysicalPosition::new(
+        monitor.position().x + ((monitor.size().width - size.width) / 2) as i32,
+        monitor.position().y + ((monitor.size().height - size.height) / 2) as i32,
+    );
+    create_pin(&app, data, position, size).await?;
+    window.close().map_err(|e| e.to_string())
+}
+
+/**
+ * 取消历史图片选择并返回启动器。
+ * @param app 桌面宿主句柄。
+ * @param window 图片选择页窗口。
+ * @returns 关闭操作结果。
+ */
+#[tauri::command]
+pub(crate) fn screenshot_history_close(
+    app: AppHandle,
+    window: WebviewWindow,
+) -> Result<(), String> {
+    require_history(&window)?;
+    window.close().map_err(|e| e.to_string())?;
+    crate::commands::launcher::show_main_window(&app);
+    Ok(())
 }
 
 /// 在贴图图片解码完成后显示窗口，避免先弹出黑色空窗。
@@ -582,7 +879,29 @@ fn cleanup_pin(app: &AppHandle, label: &str) {
 
 #[cfg(test)]
 mod tests {
-    use super::{validate_png, MAX_SCREENSHOT_BYTES};
+    use super::{proportional_size, validate_png, MAX_SCREENSHOT_BYTES};
+
+    /**
+     * 验证横图、竖图及缩小图片在缩放上限附近仍保持原图比例。
+     * @returns 无返回值。
+     */
+    #[test]
+    fn keeps_pin_aspect_ratio() {
+        for (width, height, target) in [
+            (1600, 900, 800.0),
+            (900, 1600, 1800.0),
+            (100, 400, 8192.0),
+            (16, 9, 32.0),
+        ] {
+            let size = proportional_size(width, height, target);
+            assert!(size.width > 0 && size.height > 0);
+            assert!(size.width <= 16384 && size.height <= 16384);
+            let error = (f64::from(size.height)
+                - f64::from(size.width) * f64::from(height) / f64::from(width))
+            .abs();
+            assert!(error <= 1.0);
+        }
+    }
 
     /// 拒绝空数据和超过上限的截图请求。
     #[test]

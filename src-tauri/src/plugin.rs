@@ -85,6 +85,18 @@ const BUNDLED_PLUGIN_FILES: &[BundledPlugin] = &[
                 "pin.css",
                 include_bytes!("../resources/default-plugins/screenshot/pin.css"),
             ),
+            (
+                "history.html",
+                include_bytes!("../resources/default-plugins/screenshot/history.html"),
+            ),
+            (
+                "history.js",
+                include_bytes!("../resources/default-plugins/screenshot/history.js"),
+            ),
+            (
+                "history.css",
+                include_bytes!("../resources/default-plugins/screenshot/history.css"),
+            ),
         ],
     ),
 ];
@@ -1247,7 +1259,13 @@ pub(crate) fn serve_plugin_asset(
     }
 }
 
-/// 解析插件私有协议路径，并验证窗口身份、路径分量和最终规范路径。
+/**
+ * 解析插件资源并验证窗口身份，包括截图插件的贴图和历史窗口。
+ * @param root 插件根目录。
+ * @param webview_label 请求资源的 Webview 标识。
+ * @param uri_path 协议资源路径。
+ * @returns 通过身份与目录边界校验的路径或错误。
+ */
 fn resolve_plugin_asset(
     root: &Path,
     webview_label: &str,
@@ -1257,8 +1275,9 @@ fn resolve_plugin_asset(
     let plugin_name = components.next().unwrap_or_default();
     validate_plugin_name(plugin_name)?;
     let base_label = plugin_window_label(plugin_name);
-    let is_screenshot_pin =
-        plugin_name == "screenshot" && webview_label.starts_with("plugin-screenshot-pin-");
+    let is_screenshot_pin = plugin_name == "screenshot"
+        && (webview_label.starts_with("plugin-screenshot-pin-")
+            || webview_label == "plugin-screenshot-history");
     if webview_label != base_label && !is_screenshot_pin {
         return Err("插件窗口与资源身份不匹配".to_owned());
     }

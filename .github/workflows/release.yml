@@ -76,3 +76,14 @@ jobs:
           uploadUpdaterJson: true
           updaterJsonPreferNsis: true
           args: ${{ matrix.args }}
+      - name: Upload Windows portable executable from the same build
+        if: matrix.platform == 'windows-latest'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $version = (Get-Content package.json -Raw | ConvertFrom-Json).version
+          $asset = "ZTools_v${version}_windows_x64_portable.exe"
+          Copy-Item 'src-tauri/target/release/ztools-tauri.exe' $asset
+          gh release upload "v$version" $asset --clobber
+          if ($LASTEXITCODE -ne 0) { throw 'Portable executable upload failed' }

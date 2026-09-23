@@ -1,0 +1,15 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <link rel="stylesheet" href="history.css" />
+  <title>贴图 · 历史图片</title>
+</head>
+<body>
+  <header><div><strong>贴图</strong><p>选择剪贴板历史图片</p></div><div><button id="refresh" type="button">刷新</button><button id="close" type="button" aria-label="关闭">×</button></div></header>
+  <main aria-label="剪贴板历史图片"><p id="message" role="status">正在读取图片…</p><div id="images" role="group" aria-label="图片列表"></div></main>
+  <footer><span>双击图片或按 Enter 贴图 · Esc 返回</span><button id="pin" type="button" disabled>贴图</button></footer>
+  <script type="module" src="history.js"></script>
+</body>
+</html>

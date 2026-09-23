@@ -26,7 +26,6 @@ body,
 #screenshot-pin {
   position: relative;
   background: #111214;
-  border: 1px solid rgba(255, 255, 255, 0.2);
 }
 
 .pin-image {
@@ -49,7 +48,6 @@ body,
   border-radius: 7px;
   box-shadow: 0 5px 18px rgba(0, 0, 0, 0.34);
   opacity: 0;
-  transition: opacity 120ms ease;
 }
 
 #screenshot-pin:hover .pin-controls,

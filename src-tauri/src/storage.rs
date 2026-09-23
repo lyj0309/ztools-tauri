@@ -5,12 +5,26 @@ use rusqlite::{backup::Backup, params, Connection};
 use crate::models::{AppEntry, ClipboardEntry, HistoryEntry, LauncherSettings, LocalShortcut};
 use crate::sync::SyncDocument;
 
+const CLIPBOARD_IMAGE_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS clipboard_images (
+                   id INTEGER PRIMARY KEY AUTOINCREMENT,
+                   content_hash TEXT NOT NULL UNIQUE,
+                   width INTEGER NOT NULL,
+                   height INTEGER NOT NULL,
+                   png BLOB NOT NULL,
+                   thumbnail TEXT NOT NULL,
+                   captured_at INTEGER NOT NULL
+                 );";
+
 pub(crate) struct Store {
     connection: Connection,
 }
 
 impl Store {
-    /// 打开 SQLite 数据库并建立新架构所需的数据表。
+    /**
+     * 打开 SQLite 数据库并补建文本和图片历史等应用表。
+     * @param path 数据库文件路径。
+     * @returns 可用的数据存储或初始化错误。
+     */
     pub(crate) fn open(path: &Path) -> Result<Self, String> {
         // 确保首次启动时应用数据目录已经存在。
         if let Some(parent) = path.parent() {
@@ -91,6 +105,9 @@ impl Store {
             )
             .map_err(|error| error.to_string())?;
 
+        connection
+            .execute_batch(CLIPBOARD_IMAGE_SCHEMA)
+            .map_err(|error| error.to_string())?;
         Ok(Self { connection })
     }
 
@@ -107,7 +124,11 @@ impl Store {
             .map_err(|error| error.to_string())
     }
 
-    /// 用已校验的 SQLite 文件覆盖当前在线数据库。
+    /**
+     * 恢复已校验的数据库，并补建旧版本缺少的图片历史表。
+     * @param path 备份数据库路径。
+     * @returns 恢复与兼容迁移结果。
+     */
     pub(crate) fn restore_from(&mut self, path: &Path) -> Result<(), String> {
         let source = Connection::open(path).map_err(|error| error.to_string())?;
         source
@@ -120,6 +141,11 @@ impl Store {
             Backup::new(&source, &mut self.connection).map_err(|error| error.to_string())?;
         backup
             .run_to_completion(128, Duration::from_millis(2), None)
+            .map_err(|error| error.to_string())?;
+        // 先释放 SQLite 备份句柄，再补建旧备份中不存在的新表。
+        drop(backup);
+        self.connection
+            .execute_batch(CLIPBOARD_IMAGE_SCHEMA)
             .map_err(|error| error.to_string())
     }
 
@@ -369,6 +395,94 @@ impl Store {
             .map_err(|error| error.to_string())
     }
 
+    /**
+     * 保存去重图片并限制历史条数及总图片体积。
+     * @param image 已编码的原图、缩略图和内容哈希。
+     * @param timestamp 捕获时间戳。
+     * @returns 写入成功返回 Ok，否则返回数据库错误。
+     */
+    pub(crate) fn capture_clipboard_image(
+        &self,
+        image: &crate::clipboard_images::CapturedImage,
+        timestamp: i64,
+    ) -> Result<(), String> {
+        let tx = self
+            .connection
+            .unchecked_transaction()
+            .map_err(|e| e.to_string())?;
+        tx.execute(
+            "INSERT INTO clipboard_images(content_hash,width,height,png,thumbnail,captured_at)
+             VALUES(?1,?2,?3,?4,?5,?6)
+             ON CONFLICT(content_hash) DO UPDATE SET captured_at=excluded.captured_at",
+            params![
+                image.hash,
+                image.width,
+                image.height,
+                image.png,
+                image.thumbnail,
+                timestamp
+            ],
+        )
+        .map_err(|e| e.to_string())?;
+        // 最多保存 50 张、合计 128 MiB 原图，避免持续截图使数据库无限增长。
+        tx.execute(
+            "DELETE FROM clipboard_images WHERE id NOT IN (
+               SELECT id FROM (
+                 SELECT id, ROW_NUMBER() OVER (ORDER BY captured_at DESC,id DESC) AS rank,
+                 SUM(length(png)) OVER (ORDER BY captured_at DESC,id DESC) AS bytes
+                 FROM clipboard_images
+               ) WHERE rank <= 50 AND bytes <= 134217728
+             )",
+            [],
+        )
+        .map_err(|e| e.to_string())?;
+        tx.commit().map_err(|e| e.to_string())
+    }
+
+    /**
+     * 返回图片历史元数据与小尺寸预览，原图留在数据库内。
+     * @returns 按最近复制时间排序的图片列表或数据库错误。
+     */
+    pub(crate) fn clipboard_images(
+        &self,
+    ) -> Result<Vec<crate::models::ClipboardImageEntry>, String> {
+        let mut statement = self
+            .connection
+            .prepare(
+                "SELECT id,width,height,captured_at,thumbnail FROM clipboard_images
+             ORDER BY captured_at DESC,id DESC LIMIT 50",
+            )
+            .map_err(|e| e.to_string())?;
+        let rows = statement
+            .query_map([], |row| {
+                Ok(crate::models::ClipboardImageEntry {
+                    id: row.get(0)?,
+                    width: row.get(1)?,
+                    height: row.get(2)?,
+                    captured_at: row.get(3)?,
+                    thumbnail: row.get(4)?,
+                })
+            })
+            .map_err(|e| e.to_string())?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(|e| e.to_string())
+    }
+
+    /**
+     * 读取指定历史图片的原始 PNG，供悬浮贴图使用。
+     * @param id 图片历史的数据库标识。
+     * @returns PNG 字节，记录不存在时返回错误。
+     */
+    pub(crate) fn clipboard_image_png(&self, id: i64) -> Result<Vec<u8>, String> {
+        self.connection
+            .query_row(
+                "SELECT png FROM clipboard_images WHERE id=?1",
+                [id],
+                |row| row.get(0),
+            )
+            .map_err(|e| format!("历史图片不存在或已清理：{e}"))
+    }
+
     /// 删除单条剪贴板历史记录。
     pub(crate) fn delete_clipboard_entry(&self, id: i64) -> Result<(), String> {
         self.connection
@@ -377,10 +491,14 @@ impl Store {
         self.touch_modified(now_millis())
     }
 
-    /// 清空全部剪贴板历史。
+    /**
+     * 同时清空文本与图片剪贴板历史。
+     * @returns 清理成功返回 Ok，否则返回数据库错误。
+     */
     pub(crate) fn clear_clipboard_history(&self) -> Result<(), String> {
+        // 图片和文本使用同一清理入口，避免用户清空历史后图片仍被保留。
         self.connection
-            .execute("DELETE FROM clipboard_history", [])
+            .execute_batch("DELETE FROM clipboard_history; DELETE FROM clipboard_images;")
             .map_err(|error| error.to_string())?;
         self.touch_modified(now_millis())
     }
@@ -642,7 +760,12 @@ impl Store {
         self.touch_modified(now_millis())
     }
 
-    /// 删除超过保留天数的剪贴板记录并返回删除数量。
+    /**
+     * 按同一保留期限清理文本和图片历史。
+     * @param retention_days 保留天数。
+     * @param now 当前时间戳。
+     * @returns 删除记录总数或数据库错误。
+     */
     pub(crate) fn prune_clipboard(&self, retention_days: u32, now: i64) -> Result<usize, String> {
         let cutoff = now.saturating_sub(i64::from(retention_days) * 86_400_000);
         let changed = self
@@ -652,7 +775,14 @@ impl Store {
                 [cutoff],
             )
             .map_err(|error| error.to_string())?;
-        Ok(changed)
+        let images = self
+            .connection
+            .execute(
+                "DELETE FROM clipboard_images WHERE captured_at < ?1",
+                [cutoff],
+            )
+            .map_err(|error| error.to_string())?;
+        Ok(changed + images)
     }
 
     /// 返回按用户位置排序的收藏应用标识。
@@ -838,6 +968,49 @@ mod tests {
     use super::Store;
     use crate::models::{AppEntry, LauncherSettings};
     use std::fs;
+
+    /**
+     * 验证图片历史去重排序、跨连接持久化、数量限制和统一清理。
+     * @returns 无返回值。
+     */
+    #[test]
+    fn persists_and_bounds_clipboard_images() {
+        let directory = std::env::temp_dir().join(format!(
+            "ztools-image-history-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let path = directory.join("state.sqlite3");
+        let store = Store::open(&path).unwrap();
+        let mut image = crate::clipboard_images::CapturedImage {
+            hash: "first".to_owned(),
+            width: 1600,
+            height: 900,
+            png: vec![1, 2, 3],
+            thumbnail: "preview".to_owned(),
+        };
+        store.capture_clipboard_image(&image, 100).unwrap();
+        let first = store.clipboard_images().unwrap()[0].id;
+        store.capture_clipboard_image(&image, 200).unwrap();
+        assert_eq!(store.clipboard_images().unwrap().len(), 1);
+        assert_eq!(store.clipboard_images().unwrap()[0].id, first);
+        assert_eq!(store.clipboard_images().unwrap()[0].captured_at, 200);
+        drop(store);
+        let store = Store::open(&path).unwrap();
+        assert_eq!(store.clipboard_image_png(first).unwrap(), vec![1, 2, 3]);
+        for index in 0..51 {
+            image.hash = format!("image-{index}");
+            store.capture_clipboard_image(&image, 300 + index).unwrap();
+        }
+        assert_eq!(store.clipboard_images().unwrap().len(), 50);
+        assert!(store.clipboard_image_png(first).is_err());
+        store.prune_clipboard(1, 86_400_340).unwrap();
+        assert_eq!(store.clipboard_images().unwrap().len(), 11);
+        store.clear_clipboard_history().unwrap();
+        assert!(store.clipboard_images().unwrap().is_empty());
+        drop(store);
+        let _ = fs::remove_dir_all(directory);
+    }
 
     /// 验证设置、收藏与历史能够跨 SQLite 连接持久化。
     #[test]

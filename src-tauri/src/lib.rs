@@ -1,4 +1,5 @@
 mod backup;
+mod clipboard_images;
 mod commands;
 mod desktop;
 mod launcher;
@@ -81,6 +82,10 @@ pub fn run() {
             screenshot::screenshot_copy,
             screenshot::screenshot_pin,
             screenshot::screenshot_pin_ready,
+            screenshot::screenshot_pin_resize,
+            screenshot::screenshot_history_list,
+            screenshot::screenshot_history_pin,
+            screenshot::screenshot_history_close,
             screenshot::screenshot_cancel,
             screenshot::screenshot_pin_source,
             screenshot::screenshot_pin_start_dragging,
@@ -266,7 +271,11 @@ fn configure_linux_launcher_minimum_height(window: &tauri::WebviewWindow) {
     }
 }
 
-/// 在显式隔离测试模式下按环境变量启动插件，供真实 Webview E2E 绕过桌面拖放驱动限制。
+/**
+ * 在隔离测试模式下启动指定插件，截图与历史贴图走正式入口。
+ * @param app 桌面宿主句柄。
+ * @returns 启动任务提交结果。
+ */
 fn launch_e2e_plugin(app: &tauri::AppHandle) -> Result<(), Box<dyn std::error::Error>> {
     let Some(plugin_name) = std::env::var_os("ZTOOLS_E2E_PLUGIN_NAME") else {
         return Ok(());
@@ -279,14 +288,19 @@ fn launch_e2e_plugin(app: &tauri::AppHandle) -> Result<(), Box<dyn std::error::E
         .and_then(|value| serde_json::from_str(&value).ok())
         .unwrap_or(serde_json::Value::Null);
     eprintln!("[e2e] launching plugin {plugin_name}:{feature_code}");
-    if plugin_name == "screenshot" && feature_code == "capture" {
+    if plugin_name == "screenshot" && (feature_code == "capture" || feature_code == "pin") {
         let screenshot_app = app.clone();
         let main = app
             .get_webview_window("main")
             .ok_or_else(|| io::Error::other("main window is unavailable"))?;
-        // 截图默认插件需要先执行异步抓屏，再创建其专用全屏编辑窗口。
+        // 测试使用正式异步入口创建截图编辑器或历史图片选择页。
         tauri::async_runtime::spawn(async move {
-            match screenshot::start_editor(screenshot_app, main).await {
+            let result = if feature_code == "pin" {
+                screenshot::start_history(screenshot_app, main).await
+            } else {
+                screenshot::start_editor(screenshot_app, main).await
+            };
+            match result {
                 Ok(()) => eprintln!("[e2e] screenshot plugin launch completed"),
                 Err(error) => eprintln!("[e2e] screenshot plugin launch failed: {error}"),
             }

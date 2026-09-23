@@ -172,7 +172,15 @@ pub(crate) fn uninstall_plugin(
     list_installed_plugins(&runtime, &state)
 }
 
-/// 在异步命令工作线程中启动插件 feature，避免 Windows 创建 WebView2 时阻塞主事件循环。
+/**
+ * 在异步线程中启动插件指令，截图与历史贴图使用各自入口。
+ * @param plugin_name 插件名称。
+ * @param feature_code 功能标识。
+ * @param payload 可选的启动参数。
+ * @param app 桌面宿主句柄。
+ * @param runtime 插件运行时状态。
+ * @returns 插件功能启动结果。
+ */
 #[tauri::command]
 pub(crate) async fn launch_plugin_feature(
     plugin_name: String,
@@ -193,14 +201,18 @@ pub(crate) async fn launch_plugin_feature(
         return Ok(());
     }
     if plugin_name == "screenshot" {
-        if feature_code != "capture" {
+        if feature_code != "capture" && feature_code != "pin" {
             return Err("未知的截图插件功能".to_owned());
         }
         let main = app
             .get_webview_window("main")
             .ok_or_else(|| "主启动器窗口不存在".to_owned())?;
         // 默认截图插件由宿主先隐藏启动器并抓取屏幕，再加载插件自带编辑界面。
-        crate::screenshot::start_editor(app.clone(), main).await?;
+        if feature_code == "pin" {
+            crate::screenshot::start_history(app.clone(), main).await?;
+        } else {
+            crate::screenshot::start_editor(app.clone(), main).await?;
+        }
         return Ok(());
     }
     if plugin_name == "system" {

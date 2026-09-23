@@ -6,7 +6,7 @@ on:
       release_tag:
         description: Release tag whose portable executable is tested
         required: true
-        default: v0.1.13
+        default: v0.1.14
 
 permissions:
   contents: read
@@ -75,6 +75,9 @@ jobs:
               public static extern bool GetWindowRect(IntPtr window, out Rect rect);
 
               [DllImport("user32.dll")]
+              public static extern bool GetClientRect(IntPtr window, out Rect rect);
+
+              [DllImport("user32.dll")]
               public static extern bool SetCursorPos(int x, int y);
 
               [DllImport("user32.dll")]
@@ -114,7 +117,7 @@ jobs:
                       Rect rect;
                       StringBuilder text = new StringBuilder(256);
                       GetWindowText(window, text, text.Capacity);
-                      if (text.ToString().Contains(title) && IsWindowVisible(window) && GetWindowRect(window, out rect)) {
+                      if (text.ToString() == title && IsWindowVisible(window) && GetWindowRect(window, out rect)) {
                           long width = Math.Max(0, rect.Right - rect.Left);
                           long height = Math.Max(0, rect.Bottom - rect.Top);
                           long distance = Math.Abs(width - expectedWidth) + Math.Abs(height - expectedHeight);
@@ -220,6 +223,7 @@ jobs:
 
           $launcherProcess = $null
           $screenshotProcess = $null
+          $historyProcess = $null
           try {
             Remove-Item Env:ZTOOLS_E2E_PLUGIN_NAME -ErrorAction SilentlyContinue
             Remove-Item Env:ZTOOLS_E2E_PLUGIN_FEATURE -ErrorAction SilentlyContinue
@@ -281,6 +285,51 @@ jobs:
             [DesktopNative]::GetWindowRect($pin, [ref]$pinRect) | Out-Null
             $diagnostics.pinBounds = @($pinRect.Left, $pinRect.Top, $pinRect.Right, $pinRect.Bottom)
             Save-DesktopScreenshot -Path 'artifacts/05-pin.png'
+
+            # 滚轮必须同时改变宽高，校验客户区以排除 Windows 非客户区边框影响。
+            $before = New-Object DesktopNative+Rect
+            [DesktopNative]::GetClientRect($pin, [ref]$before) | Out-Null
+            [DesktopNative]::SetCursorPos($pinRect.Left + 150, $pinRect.Top + 150) | Out-Null
+            [DesktopNative]::SetForegroundWindow($pin) | Out-Null
+            [DesktopNative]::mouse_event(0x0800, 0, 0, 120, [UIntPtr]::Zero)
+            Start-Sleep -Seconds 2
+            $after = New-Object DesktopNative+Rect
+            [DesktopNative]::GetClientRect($pin, [ref]$after) | Out-Null
+            if ($after.Right -le $before.Right -or $after.Bottom -le $before.Bottom) {
+              throw 'Mouse wheel did not enlarge the floating image'
+            }
+            $expectedHeight = $after.Right * $before.Bottom / $before.Right
+            if ([Math]::Abs($after.Bottom - $expectedHeight) -gt 2) {
+              throw 'Floating image aspect ratio changed after scaling'
+            }
+            $diagnostics.pinAspectRatioPreserved = $true
+            Save-DesktopScreenshot -Path 'artifacts/06-pin-scaled.png'
+
+            # 通过真实贴图快捷键复制原图，让后台监控保存后重启应用验证历史持久化。
+            [DesktopNative]::SetForegroundWindow($pin) | Out-Null
+            [DesktopNative]::keybd_event(0x11, 0, 0, [UIntPtr]::Zero)
+            [DesktopNative]::keybd_event(0x43, 0, 0, [UIntPtr]::Zero)
+            [DesktopNative]::keybd_event(0x43, 0, 0x0002, [UIntPtr]::Zero)
+            [DesktopNative]::keybd_event(0x11, 0, 0x0002, [UIntPtr]::Zero)
+            Start-Sleep -Seconds 3
+            Stop-TestProcess -Process $screenshotProcess
+            $env:ZTOOLS_E2E_PLUGIN_FEATURE = 'pin'
+            $historyProcess = Start-Process -FilePath $executable -PassThru `
+              -RedirectStandardOutput 'artifacts/history-stdout.log' `
+              -RedirectStandardError 'artifacts/history-stderr.log'
+            $picker = Wait-ProcessWindow -ProcessId $historyProcess.Id -MinWidth 600 -MinHeight 400
+            Start-Sleep -Seconds 2
+            Save-DesktopScreenshot -Path 'artifacts/07-image-history.png'
+            [DesktopNative]::SetForegroundWindow($picker) | Out-Null
+            [DesktopNative]::keybd_event(0x0D, 0, 0, [UIntPtr]::Zero)
+            [DesktopNative]::keybd_event(0x0D, 0, 0x0002, [UIntPtr]::Zero)
+            $historyPin = Wait-WindowByTitleNearSize -Title 'ZTools 贴图' `
+              -ExpectedWidth ($endX - $startX) -ExpectedHeight ($endY - $startY)
+            if ([DesktopNative]::IsWindowVisible($picker)) {
+              throw 'History picker stayed visible after pinning selected image'
+            }
+            $diagnostics.historyImagePinned = $true
+            Save-DesktopScreenshot -Path 'artifacts/08-history-pin.png'
           } catch {
             $diagnostics.error = $_.Exception.Message
             Save-DesktopScreenshot -Path 'artifacts/99-error.png'
@@ -289,6 +338,7 @@ jobs:
             $diagnostics | ConvertTo-Json -Depth 4 | Set-Content artifacts/diagnostics.json
             Stop-TestProcess -Process $launcherProcess
             Stop-TestProcess -Process $screenshotProcess
+            Stop-TestProcess -Process $historyProcess
           }
 
       - name: Upload Windows desktop evidence
