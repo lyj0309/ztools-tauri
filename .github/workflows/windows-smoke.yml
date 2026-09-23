@@ -278,7 +278,12 @@ jobs:
               $recognized = ''
               for ($attempt = 0; $attempt -lt 20; $attempt++) {
                 Start-Sleep -Seconds 1
-                [System.Windows.Forms.SendKeys]::SendWait('^a^c')
+                [DesktopNative]::keybd_event(0x11, 0, 0, [UIntPtr]::Zero)
+                [DesktopNative]::keybd_event(0x41, 0, 0, [UIntPtr]::Zero)
+                [DesktopNative]::keybd_event(0x41, 0, 0x0002, [UIntPtr]::Zero)
+                [DesktopNative]::keybd_event(0x43, 0, 0, [UIntPtr]::Zero)
+                [DesktopNative]::keybd_event(0x43, 0, 0x0002, [UIntPtr]::Zero)
+                [DesktopNative]::keybd_event(0x11, 0, 0x0002, [UIntPtr]::Zero)
                 Start-Sleep -Milliseconds 150
                 $recognized = Get-Clipboard -Raw
                 if ($recognized -and $recognized -ne 'ZTOOLS_OCR_PENDING' -and $recognized.Length -gt 20) { break }
