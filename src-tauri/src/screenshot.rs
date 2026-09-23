@@ -1,7 +1,6 @@
 use std::{
     collections::HashMap,
     fs,
-    io::Cursor,
     path::{Path, PathBuf},
     sync::{
         atomic::{AtomicU64, Ordering},
@@ -12,8 +11,9 @@ use std::{
 
 use serde::Serialize;
 use tauri::{
-    ipc::Response, AppHandle, Emitter, Manager, PhysicalPosition, PhysicalSize, WebviewUrl,
-    WebviewWindow, WebviewWindowBuilder, WindowEvent,
+    ipc::{InvokeBody, Request, Response},
+    AppHandle, Emitter, Manager, PhysicalPosition, PhysicalSize, WebviewUrl, WebviewWindow,
+    WebviewWindowBuilder, WindowEvent,
 };
 
 use crate::desktop;
@@ -135,7 +135,12 @@ pub(crate) async fn start_editor(app: AppHandle, main: WebviewWindow) -> Result<
     let capture_result = tauri::async_runtime::spawn_blocking(move || {
         // 给窗口管理器留出一帧隐藏主窗口，避免把启动器截进背景。
         std::thread::sleep(std::time::Duration::from_millis(220));
-        desktop::capture_screen_to(&capture_app, &capture_source)
+        desktop::capture_display_to(
+            &capture_app,
+            &capture_source,
+            monitor_position,
+            monitor_size,
+        )
     })
     .await
     .map_err(|error| format!("截图任务异常结束：{error}"))?;
@@ -168,8 +173,8 @@ pub(crate) async fn start_editor(app: AppHandle, main: WebviewWindow) -> Result<
     editor.on_window_event({
         let app = app.clone();
         move |event| {
-            if matches!(event, WindowEvent::Destroyed) {
-                cleanup_editor_source(&app);
+            if matches!(event, WindowEvent::Destroyed) && cleanup_editor_source(&app) {
+                // 非正常销毁仍恢复启动器；正常完成会先取走会话，因此不会重复弹窗和抢焦点。
                 crate::commands::launcher::show_main_window(&app);
             }
         }
@@ -179,9 +184,7 @@ pub(crate) async fn start_editor(app: AppHandle, main: WebviewWindow) -> Result<
             monitor_position.x,
             monitor_position.y,
         ))
-        .and_then(|_| editor.set_size(PhysicalSize::new(monitor_size.width, monitor_size.height)))
-        .and_then(|_| editor.show())
-        .and_then(|_| editor.set_focus());
+        .and_then(|_| editor.set_size(PhysicalSize::new(monitor_size.width, monitor_size.height)));
     if let Err(error) = prepare_result {
         // 创建后的任一步失败都销毁半成品窗口并恢复启动器。
         let _ = editor.close();
@@ -189,68 +192,7 @@ pub(crate) async fn start_editor(app: AppHandle, main: WebviewWindow) -> Result<
         crate::commands::launcher::show_main_window(&app);
         return Err(error.to_string());
     }
-    schedule_e2e_pin_trigger(&app, &editor);
     Ok(())
-}
-
-/// 在隔离测试模式下等待外部触发文件，再点击截图编辑器的贴图按钮。
-fn schedule_e2e_pin_trigger(app: &AppHandle, editor: &WebviewWindow) {
-    if std::env::var("ZTOOLS_E2E").as_deref() != Ok("1") {
-        return;
-    }
-    let Some(trigger) = std::env::var_os("ZTOOLS_E2E_SCREENSHOT_PIN_TRIGGER") else {
-        return;
-    };
-    let trigger = PathBuf::from(trigger);
-    let app = app.clone();
-    let editor = editor.clone();
-    tauri::async_runtime::spawn(async move {
-        let triggered = tauri::async_runtime::spawn_blocking(move || {
-            // 等待桌面自动化完成选区，超时后退出，避免测试钩子常驻。
-            for _ in 0..120 {
-                if trigger.is_file() {
-                    let _ = fs::remove_file(&trigger);
-                    return true;
-                }
-                std::thread::sleep(std::time::Duration::from_millis(250));
-            }
-            false
-        })
-        .await
-        .unwrap_or(false);
-        if !triggered {
-            eprintln!("[e2e] screenshot pin trigger timed out");
-            return;
-        }
-        // 触发文件在拖选完成后创建，直接调用正式命令验证原生窗口链路。
-        let result = create_e2e_native_pin(&app, &editor);
-        eprintln!("[e2e] screenshot native pin fallback: {result:?}");
-    });
-}
-
-/// 从当前截图源裁剪固定测试区域并调用正式贴图命令。
-fn create_e2e_native_pin(app: &AppHandle, editor: &WebviewWindow) -> Result<(), String> {
-    let runtime = app.state::<ScreenshotRuntime>();
-    let source = read_png(&runtime.editor_source()?)?;
-    let image = decode_png(&source)?;
-    let x = 120_u32.min(image.width().saturating_sub(1));
-    let y = 100_u32.min(image.height().saturating_sub(1));
-    let width = 700_u32.min(image.width().saturating_sub(x));
-    let height = 440_u32.min(image.height().saturating_sub(y));
-    let cropped = image.crop_imm(x, y, width, height);
-    let mut output = Cursor::new(Vec::new());
-    cropped
-        .write_to(&mut output, image::ImageFormat::Png)
-        .map_err(|error| format!("无法编码 E2E 贴图：{error}"))?;
-    screenshot_pin(
-        output.into_inner(),
-        f64::from(x),
-        f64::from(y),
-        f64::from(width),
-        f64::from(height),
-        app.clone(),
-        editor.clone(),
-    )
 }
 
 /// 返回当前编辑器源 PNG 的原始字节。
@@ -278,67 +220,96 @@ pub(crate) fn screenshot_editor_info(
     })
 }
 
+/// 在源图加载并完成首帧绘制后显示截图编辑器，避免空白窗口闪烁。
+#[tauri::command]
+pub(crate) fn screenshot_editor_ready(window: WebviewWindow) -> Result<(), String> {
+    require_editor(&window)?;
+    window
+        .show()
+        .and_then(|_| window.set_focus())
+        .map_err(|error| error.to_string())
+}
+
 /// 把编辑后的 PNG 保存到系统图片目录并关闭编辑器。
 #[tauri::command]
-pub(crate) fn screenshot_save(
-    data: Vec<u8>,
+pub(crate) async fn screenshot_save(
+    request: Request<'_>,
     app: AppHandle,
     window: WebviewWindow,
 ) -> Result<String, String> {
     require_editor(&window)?;
-    validate_png(&data)?;
-    let destination = save_png_to_pictures(&app, &data)?;
+    let data = raw_png(&request)?;
+    let save_app = app.clone();
+    let destination = tauri::async_runtime::spawn_blocking(move || {
+        // PNG 解码和磁盘写入不能占用窗口事件线程，否则高分屏选区会表现为应用卡死。
+        save_png_to_pictures(&save_app, &data)
+    })
+    .await
+    .map_err(|error| format!("截图保存任务异常结束：{error}"))??;
     finish_editor(
         &app,
         &window,
         "saved",
         Some(destination.to_string_lossy().as_ref()),
+        false,
     )?;
     Ok(destination.to_string_lossy().into_owned())
 }
 
 /// 把编辑后的 PNG 写入系统剪贴板并关闭编辑器。
 #[tauri::command]
-pub(crate) fn screenshot_copy(
-    data: Vec<u8>,
+pub(crate) async fn screenshot_copy(
+    request: Request<'_>,
     app: AppHandle,
     window: WebviewWindow,
 ) -> Result<(), String> {
     require_editor(&window)?;
-    validate_png(&data)?;
-    desktop::write_clipboard_image_png(&data)?;
-    finish_editor(&app, &window, "copied", None)
+    let data = raw_png(&request)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        // 图片解码和系统剪贴板写入放到阻塞线程，保持编辑器继续响应窗口事件。
+        validate_png(&data)?;
+        desktop::write_clipboard_image_png(&data)
+    })
+    .await
+    .map_err(|error| format!("截图复制任务异常结束：{error}"))??;
+    finish_editor(&app, &window, "copied", None, false)
 }
 
 /// 用编辑后的 PNG 创建无边框置顶贴图窗口并关闭编辑器。
 #[tauri::command]
-pub(crate) fn screenshot_pin(
-    data: Vec<u8>,
-    x: f64,
-    y: f64,
-    width: f64,
-    height: f64,
+pub(crate) async fn screenshot_pin(
+    request: Request<'_>,
     app: AppHandle,
     window: WebviewWindow,
 ) -> Result<(), String> {
     require_editor(&window)?;
-    validate_png(&data)?;
+    let data = raw_png(&request)?;
+    let x = request_number(&request, "x-ztools-selection-x")?;
+    let y = request_number(&request, "x-ztools-selection-y")?;
+    let width = request_number(&request, "x-ztools-selection-width")?;
+    let height = request_number(&request, "x-ztools-selection-height")?;
     if !x.is_finite() || !y.is_finite() || !width.is_finite() || !height.is_finite() {
         return Err("贴图位置或尺寸无效".to_owned());
     }
-    let width = width.clamp(80.0, 1600.0);
-    let height = height.clamp(60.0, 1200.0);
+    let width = width.round().clamp(80.0, 16_384.0) as u32;
+    let height = height.round().clamp(60.0, 16_384.0) as u32;
     let runtime = app.state::<ScreenshotRuntime>();
     let id = runtime.next_id();
     let label = format!("{PIN_LABEL_PREFIX}{id}");
     let path = temporary_path(&app, "pin", id)?;
-    fs::write(&path, &data).map_err(|error| format!("无法创建贴图文件：{error}"))?;
+    let write_path = path.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        // 校验和写盘在阻塞线程完成，防止大选区冻结 WebView2 窗口。
+        validate_png(&data)?;
+        fs::write(&write_path, &data).map_err(|error| format!("无法创建贴图文件：{error}"))
+    })
+    .await
+    .map_err(|error| format!("贴图创建任务异常结束：{error}"))??;
     runtime.register_pin(label.clone(), path.clone())?;
 
     let editor_position = window.outer_position().map_err(|error| error.to_string())?;
-    let scale_factor = window.scale_factor().map_err(|error| error.to_string())?;
-    let pin_x = editor_position.x + (x * scale_factor).round() as i32;
-    let pin_y = editor_position.y + (y * scale_factor).round() as i32;
+    let pin_x = editor_position.x + x.round() as i32;
+    let pin_y = editor_position.y + y.round() as i32;
     let build_result = WebviewWindowBuilder::new(&app, &label, plugin_url("pin.html")?)
         .title("ZTools 贴图")
         .decorations(false)
@@ -346,7 +317,7 @@ pub(crate) fn screenshot_pin(
         .always_on_top(true)
         .skip_taskbar(true)
         .visible(false)
-        .inner_size(width, height)
+        .inner_size(f64::from(width), f64::from(height))
         .min_inner_size(80.0, 60.0)
         .build();
     let pin = match build_result {
@@ -368,21 +339,31 @@ pub(crate) fn screenshot_pin(
     });
     if let Err(error) = pin
         .set_position(PhysicalPosition::new(pin_x, pin_y))
-        .and_then(|_| pin.show())
+        .and_then(|_| pin.set_size(PhysicalSize::new(width, height)))
     {
         // 贴图未能显示时回收动态窗口及其临时文件。
         let _ = pin.close();
         cleanup_pin(&app, &label);
         return Err(error.to_string());
     }
-    finish_editor(&app, &window, "pinned", None)
+    finish_editor(&app, &window, "pinned", None, false)
+}
+
+/// 在贴图图片解码完成后显示窗口，避免先弹出黑色空窗。
+#[tauri::command]
+pub(crate) fn screenshot_pin_ready(window: WebviewWindow) -> Result<(), String> {
+    require_pin(&window)?;
+    window
+        .show()
+        .and_then(|_| window.set_focus())
+        .map_err(|error| error.to_string())
 }
 
 /// 取消截图并关闭编辑器。
 #[tauri::command]
 pub(crate) fn screenshot_cancel(app: AppHandle, window: WebviewWindow) -> Result<(), String> {
     require_editor(&window)?;
-    finish_editor(&app, &window, "cancelled", None)
+    finish_editor(&app, &window, "cancelled", None, true)
 }
 
 /// 返回调用窗口对应的贴图 PNG 字节。
@@ -519,6 +500,31 @@ fn validate_png(data: &[u8]) -> Result<(), String> {
     Ok(())
 }
 
+/// 从 Tauri 原始二进制请求中读取 PNG，避免把每个字节编码成 JSON 数字。
+fn raw_png(request: &Request<'_>) -> Result<Vec<u8>, String> {
+    match request.body() {
+        InvokeBody::Raw(data) => Ok(data.clone()),
+        InvokeBody::Json(_) => Err("截图必须使用二进制数据传输".to_owned()),
+    }
+}
+
+/// 从二进制请求头读取有限浮点数形式的选区参数。
+fn request_number(request: &Request<'_>, name: &str) -> Result<f64, String> {
+    let value = request
+        .headers()
+        .get(name)
+        .ok_or_else(|| format!("截图请求缺少 {name}"))?
+        .to_str()
+        .map_err(|_| format!("截图请求头 {name} 无效"))?
+        .parse::<f64>()
+        .map_err(|_| format!("截图请求头 {name} 不是数字"))?;
+    if value.is_finite() {
+        Ok(value)
+    } else {
+        Err(format!("截图请求头 {name} 不是有限数字"))
+    }
+}
+
 /// 把 PNG 写入系统图片目录并返回最终路径。
 fn save_png_to_pictures(app: &AppHandle, data: &[u8]) -> Result<PathBuf, String> {
     validate_png(data)?;
@@ -542,6 +548,7 @@ fn finish_editor(
     window: &WebviewWindow,
     action: &str,
     path: Option<&str>,
+    restore_main: bool,
 ) -> Result<(), String> {
     cleanup_editor_source(app);
     let _ = app.emit_to(
@@ -550,15 +557,20 @@ fn finish_editor(
         serde_json::json!({ "action": action, "path": path }),
     );
     let close_result = window.close().map_err(|error| error.to_string());
-    crate::commands::launcher::show_main_window(app);
+    if restore_main {
+        // 用户取消时恢复原启动器；成功输出后保持收起，避免额外弹窗抢焦点。
+        crate::commands::launcher::show_main_window(app);
+    }
     close_result
 }
 
 /// 删除当前编辑器源图。
-fn cleanup_editor_source(app: &AppHandle) {
+fn cleanup_editor_source(app: &AppHandle) -> bool {
     if let Some(path) = app.state::<ScreenshotRuntime>().take_editor_source() {
         let _ = fs::remove_file(path);
+        return true;
     }
+    false
 }
 
 /// 删除指定贴图的临时文件和运行时记录。

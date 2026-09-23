@@ -6,7 +6,7 @@ on:
       release_tag:
         description: Release tag whose portable executable is tested
         required: true
-        default: v0.1.12
+        default: v0.1.13
 
 permissions:
   contents: read
@@ -234,7 +234,6 @@ jobs:
 
             $env:ZTOOLS_E2E_PLUGIN_NAME = 'screenshot'
             $env:ZTOOLS_E2E_PLUGIN_FEATURE = 'capture'
-            $env:ZTOOLS_E2E_SCREENSHOT_PIN_TRIGGER = Join-Path $testRoot 'pin.trigger'
             $screenshotProcess = Start-Process -FilePath $executable -PassThru `
               -RedirectStandardOutput 'artifacts/screenshot-stdout.log' `
               -RedirectStandardError 'artifacts/screenshot-stderr.log'
@@ -267,7 +266,10 @@ jobs:
             Start-Sleep -Seconds 1
             Save-DesktopScreenshot -Path 'artifacts/03-selection.png'
 
-            New-Item -ItemType File -Path $env:ZTOOLS_E2E_SCREENSHOT_PIN_TRIGGER -Force | Out-Null
+            # 直接向真实 WebView2 编辑器发送 P，覆盖前端编码、二进制 IPC 和贴图窗口完整链路。
+            [DesktopNative]::SetForegroundWindow($editor) | Out-Null
+            [DesktopNative]::keybd_event(0x50, 0, 0, [UIntPtr]::Zero)
+            [DesktopNative]::keybd_event(0x50, 0, 0x0002, [UIntPtr]::Zero)
             Start-Sleep -Seconds 1
             Save-DesktopScreenshot -Path 'artifacts/04-after-pin-click.png'
             $pin = Wait-WindowByTitleNearSize `

@@ -6,6 +6,7 @@ root.innerHTML = `
   <canvas class="capture-canvas" aria-label="截图选区画布"></canvas>
   <div class="capture-guide">拖动鼠标选择截图区域 · Esc 取消</div>
   <div class="capture-size" hidden></div>
+  <input class="capture-text-input" type="text" maxlength="200" aria-label="标注文字" placeholder="输入文字，Enter 确认" hidden />
   <div class="capture-toolbar" hidden>
     <button type="button" data-tool="select" title="重新选择区域">选区</button>
     <button type="button" data-tool="rect" title="矩形标注">矩形</button>
@@ -30,6 +31,7 @@ const context = canvas.getContext('2d');
 const toolbar = root.querySelector('.capture-toolbar');
 const guide = root.querySelector('.capture-guide');
 const sizeLabel = root.querySelector('.capture-size');
+const textInput = root.querySelector('.capture-text-input');
 const message = root.querySelector('.capture-message');
 let sourceImage = null;
 let sourceUrl = '';
@@ -40,6 +42,7 @@ let dragStart = null;
 let activeTool = 'select';
 let activeColor = '#ff3b30';
 let busy = false;
+let pendingTextPoint = null;
 /**
  * 把 Tauri 原始响应统一转换为字节数组。
  * @param value IPC 返回的 ArrayBuffer 或数字数组。
@@ -227,11 +230,52 @@ function positionControls() {
  * @returns 无返回值。
  */
 function setTool(tool) {
+    cancelTextInput();
     activeTool = tool;
     toolbar.querySelectorAll('[data-tool]').forEach((button) => {
         button.classList.toggle('active', button.dataset.tool === tool);
     });
     canvas.style.cursor = tool === 'text' ? 'text' : 'crosshair';
+}
+/**
+ * 在点击位置显示编辑层内文字输入框，避免打开阻塞式系统弹窗。
+ * @param point 文字标注的源图坐标。
+ * @returns 无返回值。
+ */
+function openTextInput(point) {
+    if (!selection)
+        return;
+    pendingTextPoint = clampToSelection(point);
+    const bounds = canvas.getBoundingClientRect();
+    const left = bounds.left + (pendingTextPoint.x / canvas.width) * bounds.width;
+    const top = bounds.top + (pendingTextPoint.y / canvas.height) * bounds.height;
+    // 输入框限制在可视区域，防止副屏边缘点击后无法确认文字。
+    textInput.style.left = `${Math.min(window.innerWidth - 230, Math.max(8, left))}px`;
+    textInput.style.top = `${Math.min(window.innerHeight - 42, Math.max(8, top))}px`;
+    textInput.value = '';
+    textInput.hidden = false;
+    textInput.focus();
+}
+/**
+ * 提交编辑层中的文字标注并恢复画布焦点。
+ * @returns 无返回值。
+ */
+function commitTextInput() {
+    const text = textInput.value.trim();
+    if (text && pendingTextPoint) {
+        annotations.push({ kind: 'text', point: pendingTextPoint, text, color: activeColor });
+    }
+    cancelTextInput();
+    redraw();
+}
+/**
+ * 关闭文字输入框并清除尚未提交的位置。
+ * @returns 无返回值。
+ */
+function cancelTextInput() {
+    pendingTextPoint = null;
+    textInput.hidden = true;
+    textInput.value = '';
 }
 /**
  * 开始选区或标注手势。
@@ -245,10 +289,7 @@ function handlePointerDown(event) {
     if (activeTool !== 'select' && !pointInsideSelection(point))
         return;
     if (activeTool === 'text') {
-        const text = window.prompt('输入标注文字')?.trim();
-        if (text)
-            annotations.push({ kind: 'text', point: clampToSelection(point), text, color: activeColor });
-        redraw();
+        openTextInput(point);
         return;
     }
     canvas.setPointerCapture(event.pointerId);
@@ -314,7 +355,7 @@ function handlePointerUp(event) {
 }
 /**
  * 把当前选区和标注渲染成独立 PNG。
- * @returns PNG 字节及选区的 CSS 位置和尺寸。
+ * @returns PNG 字节及选区在截图源图中的物理像素位置和尺寸。
  * @throws 当前没有有效选区或浏览器无法编码 PNG 时抛错。
  */
 async function renderSelection() {
@@ -336,10 +377,10 @@ async function renderSelection() {
     });
     return {
         bytes: new Uint8Array(await blob.arrayBuffer()),
-        x: (selection.x / canvas.width) * window.innerWidth,
-        y: (selection.y / canvas.height) * window.innerHeight,
-        width: (selection.width / canvas.width) * window.innerWidth,
-        height: (selection.height / canvas.height) * window.innerHeight
+        x: selection.x,
+        y: selection.y,
+        width: output.width,
+        height: output.height
     };
 }
 /**
@@ -366,22 +407,24 @@ async function exportSelection(action) {
         return;
     busy = true;
     toolbar.classList.add('busy');
+    showMessage(action === 'pin' ? '正在创建贴图…' : '正在处理截图…');
     try {
         const rendered = await renderSelection();
-        const data = Array.from(rendered.bytes);
         if (action === 'copy') {
-            await invoke('screenshot_copy', { data });
+            await invoke('screenshot_copy', rendered.bytes);
         }
         else if (action === 'save') {
-            await invoke('screenshot_save', { data });
+            await invoke('screenshot_save', rendered.bytes);
         }
         else {
-            await invoke('screenshot_pin', {
-                data,
-                x: rendered.x,
-                y: rendered.y,
-                width: rendered.width,
-                height: rendered.height
+            // 贴图 PNG 使用原始二进制 IPC，选区元数据通过小型请求头传递。
+            await invoke('screenshot_pin', rendered.bytes, {
+                headers: {
+                    'x-ztools-selection-x': String(rendered.x),
+                    'x-ztools-selection-y': String(rendered.y),
+                    'x-ztools-selection-width': String(rendered.width),
+                    'x-ztools-selection-height': String(rendered.height)
+                }
             });
         }
     }
@@ -431,6 +474,17 @@ function handleToolbarClick(event) {
  * @returns 无返回值。
  */
 function handleKeyboard(event) {
+    if (event.target === textInput) {
+        if (event.key === 'Enter') {
+            event.preventDefault();
+            commitTextInput();
+        }
+        else if (event.key === 'Escape') {
+            event.preventDefault();
+            cancelTextInput();
+        }
+        return;
+    }
     if (event.key === 'Escape') {
         event.preventDefault();
         void invoke('screenshot_cancel');
@@ -484,8 +538,12 @@ async function initialize() {
         canvas.width = info.width;
         canvas.height = info.height;
         redraw();
+        // 首帧准备完成后再发布原生窗口，避免用户看到黑色或白色加载闪烁。
+        await invoke('screenshot_editor_ready');
     }
     catch (error) {
+        // 初始化异常时仍显示编辑器内错误，用户可按 Esc 安全退出并恢复启动器。
+        await invoke('screenshot_editor_ready').catch(() => undefined);
         showMessage(`截图编辑器加载失败：${String(error)}`, true);
     }
 }
@@ -494,6 +552,10 @@ canvas.addEventListener('pointermove', handlePointerMove);
 canvas.addEventListener('pointerup', handlePointerUp);
 canvas.addEventListener('pointercancel', handlePointerUp);
 toolbar.addEventListener('click', handleToolbarClick);
+textInput.addEventListener('blur', () => {
+    if (!textInput.hidden)
+        commitTextInput();
+});
 window.addEventListener('keydown', handleKeyboard);
 window.addEventListener('resize', handleResize);
 window.addEventListener('beforeunload', () => {

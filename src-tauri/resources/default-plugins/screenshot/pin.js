@@ -121,6 +121,8 @@ async function initialize() {
         sourceUrl = URL.createObjectURL(new Blob([new Uint8Array(bytes).buffer], { type: 'image/png' }));
         image.src = sourceUrl;
         await image.decode();
+        // 图片首帧就绪后再显示原生贴图窗口，避免空白窗口抢焦点。
+        await invoke('screenshot_pin_ready');
     }
     catch (error) {
         showMessage(`贴图加载失败：${String(error)}`, true);

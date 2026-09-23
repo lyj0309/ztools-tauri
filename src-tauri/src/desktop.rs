@@ -7,7 +7,7 @@ use std::{
 };
 
 use enigo::{Direction, Enigo, Key, Keyboard, Settings};
-use tauri::{AppHandle, Manager};
+use tauri::{AppHandle, Manager, PhysicalPosition, PhysicalSize};
 
 static SYSTEM_CLIPBOARD: Mutex<Option<arboard::Clipboard>> = Mutex::new(None);
 
@@ -144,6 +144,108 @@ pub(crate) fn capture_screen_to(app: &AppHandle, output: &PathBuf) -> Result<(),
         return Err("截图工具没有生成有效图片".to_owned());
     }
     Ok(())
+}
+
+/// 把指定显示器的物理像素区域截取到宿主生成的目标路径。
+pub(crate) fn capture_display_to(
+    app: &AppHandle,
+    output: &PathBuf,
+    position: PhysicalPosition<i32>,
+    size: PhysicalSize<u32>,
+) -> Result<(), String> {
+    // 固定启动截图时的显示器边界，避免抓屏期间鼠标跨屏造成源图与编辑窗口错位。
+    capture_display_platform(app, output, position, size)?;
+    if !output.is_file() || fs::metadata(output).map_or(0, |metadata| metadata.len()) == 0 {
+        return Err("截图工具没有生成有效图片".to_owned());
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+/// 在 Linux 上截取指定物理区域，Wayland 优先使用 grim，X11 回退到 FFmpeg。
+fn capture_display_platform(
+    _app: &AppHandle,
+    output: &PathBuf,
+    position: PhysicalPosition<i32>,
+    size: PhysicalSize<u32>,
+) -> Result<(), String> {
+    let geometry = format!(
+        "{},{} {}x{}",
+        position.x, position.y, size.width, size.height
+    );
+    let grim_result = Command::new("grim")
+        .args(["-g", &geometry])
+        .arg(output)
+        .status();
+    if grim_result.as_ref().is_ok_and(|status| status.success()) {
+        return Ok(());
+    }
+
+    let display = std::env::var("DISPLAY").map_err(|_| {
+        "当前 Linux 会话无法按显示器抓屏；Wayland 请安装 grim，X11 请配置 DISPLAY".to_owned()
+    })?;
+    let input = format!("{display}{:+},{}", position.x, position.y);
+    command_result(
+        Command::new("ffmpeg")
+            .args([
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-f",
+                "x11grab",
+                "-video_size",
+                &format!("{}x{}", size.width, size.height),
+                "-i",
+                &input,
+                "-frames:v",
+                "1",
+                "-y",
+            ])
+            .arg(output)
+            .status(),
+    )
+}
+
+#[cfg(target_os = "macos")]
+/// 在 macOS 上静默截取指定显示器物理区域。
+fn capture_display_platform(
+    _app: &AppHandle,
+    output: &PathBuf,
+    position: PhysicalPosition<i32>,
+    size: PhysicalSize<u32>,
+) -> Result<(), String> {
+    let region = format!(
+        "{},{},{},{}",
+        position.x, position.y, size.width, size.height
+    );
+    command_result(
+        Command::new("screencapture")
+            .args(["-x", "-R", &region])
+            .arg(output)
+            .status(),
+    )
+}
+
+#[cfg(target_os = "windows")]
+/// 在 Windows 上按固定物理边界截取显示器，支持负坐标的副屏。
+fn capture_display_platform(
+    _app: &AppHandle,
+    output: &PathBuf,
+    position: PhysicalPosition<i32>,
+    size: PhysicalSize<u32>,
+) -> Result<(), String> {
+    const SCRIPT: &str = "Add-Type -AssemblyName System.Drawing; $o=[Environment]::GetEnvironmentVariable('ZTOOLS_SCREENSHOT_OUTPUT'); $x=[int][Environment]::GetEnvironmentVariable('ZTOOLS_SCREENSHOT_X'); $y=[int][Environment]::GetEnvironmentVariable('ZTOOLS_SCREENSHOT_Y'); $w=[int][Environment]::GetEnvironmentVariable('ZTOOLS_SCREENSHOT_WIDTH'); $h=[int][Environment]::GetEnvironmentVariable('ZTOOLS_SCREENSHOT_HEIGHT'); $i=New-Object System.Drawing.Bitmap $w,$h; $g=[System.Drawing.Graphics]::FromImage($i); $g.CopyFromScreen($x,$y,0,0,$i.Size); $i.Save($o,[System.Drawing.Imaging.ImageFormat]::Png); $g.Dispose(); $i.Dispose()";
+    command_result(
+        Command::new("powershell")
+            // 坐标和路径仅通过环境传入，避免把负坐标或路径解释为 PowerShell 源码。
+            .env("ZTOOLS_SCREENSHOT_OUTPUT", output)
+            .env("ZTOOLS_SCREENSHOT_X", position.x.to_string())
+            .env("ZTOOLS_SCREENSHOT_Y", position.y.to_string())
+            .env("ZTOOLS_SCREENSHOT_WIDTH", size.width.to_string())
+            .env("ZTOOLS_SCREENSHOT_HEIGHT", size.height.to_string())
+            .args(["-NoProfile", "-NonInteractive", "-Command", SCRIPT])
+            .status(),
+    )
 }
 
 #[cfg(target_os = "linux")]

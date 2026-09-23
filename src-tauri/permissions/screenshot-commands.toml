@@ -4,9 +4,11 @@ description = "Allows screenshot editor and pin windows to access only their tem
 commands.allow = [
   "screenshot_editor_source",
   "screenshot_editor_info",
+  "screenshot_editor_ready",
   "screenshot_save",
   "screenshot_copy",
   "screenshot_pin",
+  "screenshot_pin_ready",
   "screenshot_cancel",
   "screenshot_pin_source",
   "screenshot_pin_start_dragging",
