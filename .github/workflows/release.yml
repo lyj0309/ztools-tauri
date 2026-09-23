@@ -21,15 +21,19 @@ jobs:
           - platform: ubuntu-22.04
             args: ''
             rust-targets: ''
+            cache-key: native
           - platform: windows-latest
             args: ''
             rust-targets: ''
+            cache-key: native
           - platform: macos-latest
             args: '--target aarch64-apple-darwin'
             rust-targets: 'aarch64-apple-darwin,x86_64-apple-darwin'
+            cache-key: aarch64-apple-darwin
           - platform: macos-latest
             args: '--target x86_64-apple-darwin'
             rust-targets: 'aarch64-apple-darwin,x86_64-apple-darwin'
+            cache-key: x86_64-apple-darwin
     runs-on: ${{ matrix.platform }}
     steps:
       - uses: actions/checkout@v4
@@ -44,6 +48,11 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.rust-targets }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+          shared-key: tauri-build
+          key: ${{ matrix.cache-key }}
       - name: Install Linux desktop dependencies
         if: matrix.platform == 'ubuntu-22.04'
         run: |

@@ -28,6 +28,10 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy,rustfmt
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+          shared-key: ci
       - name: Install Linux desktop dependencies
         run: |
           sudo apt-get update
@@ -44,4 +48,3 @@ jobs:
         run: cargo test --manifest-path src-tauri/Cargo.toml --all-features
       - name: Validate compatibility ledger
         run: python3 -m json.tool docs/plugin-api-compatibility.json >/dev/null
-
