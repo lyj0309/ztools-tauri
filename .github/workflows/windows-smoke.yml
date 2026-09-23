@@ -278,12 +278,10 @@ jobs:
               $recognized = ''
               for ($attempt = 0; $attempt -lt 20; $attempt++) {
                 Start-Sleep -Seconds 1
-                [DesktopNative]::keybd_event(0x11, 0, 0, [UIntPtr]::Zero)
-                [DesktopNative]::keybd_event(0x41, 0, 0, [UIntPtr]::Zero)
-                [DesktopNative]::keybd_event(0x41, 0, 0x0002, [UIntPtr]::Zero)
-                [DesktopNative]::keybd_event(0x43, 0, 0, [UIntPtr]::Zero)
-                [DesktopNative]::keybd_event(0x43, 0, 0x0002, [UIntPtr]::Zero)
-                [DesktopNative]::keybd_event(0x11, 0, 0x0002, [UIntPtr]::Zero)
+                # 只有识别完成后，面板的“复制文字”按钮才会启用。
+                [DesktopNative]::SetCursorPos($editorRect.Right - 84, $editorRect.Top + 466) | Out-Null
+                [DesktopNative]::mouse_event(0x0002, 0, 0, 0, [UIntPtr]::Zero)
+                [DesktopNative]::mouse_event(0x0004, 0, 0, 0, [UIntPtr]::Zero)
                 Start-Sleep -Milliseconds 150
                 $recognized = Get-Clipboard -Raw
                 if ($recognized -and $recognized -ne 'ZTOOLS_OCR_PENDING' -and $recognized.Length -gt 20) { break }
@@ -294,8 +292,10 @@ jobs:
               }
               $diagnostics.screenshotOcrCopied = $true
               $diagnostics.screenshotOcrCharacters = $recognized.Length
-              [DesktopNative]::keybd_event(0x1B, 0, 0, [UIntPtr]::Zero)
-              [DesktopNative]::keybd_event(0x1B, 0, 0x0002, [UIntPtr]::Zero)
+              # 直接点击面板关闭按钮，避免焦点不在面板时 Escape 退出整个截图编辑器。
+              [DesktopNative]::SetCursorPos($editorRect.Right - 60, $editorRect.Top + 98) | Out-Null
+              [DesktopNative]::mouse_event(0x0002, 0, 0, 0, [UIntPtr]::Zero)
+              [DesktopNative]::mouse_event(0x0004, 0, 0, 0, [UIntPtr]::Zero)
             }
 
             # 直接向真实 WebView2 编辑器发送 P，覆盖前端编码、二进制 IPC 和贴图窗口完整链路。
