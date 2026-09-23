@@ -462,12 +462,7 @@ fn set_window_transitions(window: &WebviewWindow, enabled: bool) -> Result<(), S
         let hwnd = window.hwnd().map_err(|error| error.to_string())?;
         // DWMWA_TRANSITIONS_FORCEDISABLED=3；传入有效 HWND 和四字节 BOOL。
         unsafe {
-            DwmSetWindowAttribute(
-                hwnd.0 as *mut c_void,
-                3,
-                &disabled as *const i32 as *const c_void,
-                4,
-            );
+            DwmSetWindowAttribute(hwnd.0, 3, &disabled as *const i32 as *const c_void, 4);
         }
     }
     #[cfg(not(target_os = "windows"))]

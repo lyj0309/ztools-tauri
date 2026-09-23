@@ -6,7 +6,7 @@ on:
       release_tag:
         description: Release tag whose portable executable is tested
         required: true
-        default: v0.1.14
+        default: v0.1.15
 
 permissions:
   contents: read
@@ -269,6 +269,29 @@ jobs:
             [DesktopNative]::mouse_event(0x0004, 0, 0, 0, [UIntPtr]::Zero)
             Start-Sleep -Seconds 1
             Save-DesktopScreenshot -Path 'artifacts/03-selection.png'
+
+            if ([version]$env:RELEASE_TAG.TrimStart('v') -ge [version]'0.1.15') {
+              # 从实际截图选区运行系统 OCR，通过真实键盘复制结果验证完整 IPC 链路。
+              Set-Clipboard -Value 'ZTOOLS_OCR_PENDING'
+              [DesktopNative]::keybd_event(0x4F, 0, 0, [UIntPtr]::Zero)
+              [DesktopNative]::keybd_event(0x4F, 0, 0x0002, [UIntPtr]::Zero)
+              $recognized = ''
+              for ($attempt = 0; $attempt -lt 20; $attempt++) {
+                Start-Sleep -Seconds 1
+                [System.Windows.Forms.SendKeys]::SendWait('^a^c')
+                Start-Sleep -Milliseconds 150
+                $recognized = Get-Clipboard -Raw
+                if ($recognized -and $recognized -ne 'ZTOOLS_OCR_PENDING' -and $recognized.Length -gt 20) { break }
+              }
+              Save-DesktopScreenshot -Path 'artifacts/09-screenshot-ocr.png'
+              if (-not $recognized -or $recognized -eq 'ZTOOLS_OCR_PENDING' -or $recognized.Length -le 20) {
+                throw 'Screenshot OCR did not produce copyable text from the desktop selection'
+              }
+              $diagnostics.screenshotOcrCopied = $true
+              $diagnostics.screenshotOcrCharacters = $recognized.Length
+              [DesktopNative]::keybd_event(0x1B, 0, 0, [UIntPtr]::Zero)
+              [DesktopNative]::keybd_event(0x1B, 0, 0x0002, [UIntPtr]::Zero)
+            }
 
             # 直接向真实 WebView2 编辑器发送 P，覆盖前端编码、二进制 IPC 和贴图窗口完整链路。
             [DesktopNative]::SetForegroundWindow($editor) | Out-Null
