@@ -12,9 +12,9 @@ static OCR_BUSY: Mutex<()> = Mutex::new(());
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct OcrResult {
-    text: String,
-    language: String,
-    engine: &'static str,
+    pub(crate) text: String,
+    pub(crate) language: String,
+    pub(crate) engine: &'static str,
 }
 
 /**

@@ -50,6 +50,7 @@ libloading = "0.8"
 ppocr-rs = { git = "https://github.com/dariofinardi/df-ppocr-rs", rev = "48e8cb67b72a194672587d9745aec5e65502423b", features = ["example-dynamic"] }
 serde_yaml = "0.9"
 tar = "0.4"
+tokio = { version = "1", features = ["sync"] }
 
 [profile.release]
 panic = "abort"

@@ -7345,6 +7345,7 @@ dependencies = [
  "tauri-plugin-notification",
  "tauri-plugin-single-instance",
  "tauri-plugin-updater",
+ "tokio",
  "walkdir",
  "windows",
  "zip 2.4.2",

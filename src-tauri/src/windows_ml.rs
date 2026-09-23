@@ -23,7 +23,10 @@ const DET_ONNX_SHA256: &str = "a56a3430a96a6c691f8bfbbb297208bb9573c3d70083d6382
 const REC_ONNX_SHA256: &str = "d5de4cb712dc90158c4f966e7ed25b87b5d16a1ab7c8e14b9f9c2b4aa269dd36";
 const DET_PREFIX: &str = "PP-OCRv6_tiny_det_onnx";
 const REC_PREFIX: &str = "PP-OCRv6_tiny_rec_0515_onnx";
+// Windows App SDK 1.8.1 的 MSIX 运行时版本为 8000.625.330.0。
+const MIN_WINDOWS_ML_RUNTIME: u64 = (8000_u64 << 48) | (625_u64 << 32) | (330_u64 << 16);
 static WINDOWS_ML_READY: OnceLock<bool> = OnceLock::new();
+static MODEL_LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
 
 pub(crate) struct ModelPaths {
     det: PathBuf,
@@ -70,8 +73,8 @@ fn initialize_runtime() -> Result<(), String> {
         let initialize: libloading::Symbol<Initialize> = library
             .get(b"MddBootstrapInitialize2")
             .map_err(|error| error.to_string())?;
-        // 1.8.0 尚无 Windows ML；运行时挂载后再探测 onnxruntime.dll。
-        let hr = initialize(0x0001_0008, std::ptr::null(), 0, 0);
+        // 精确要求 1.8.1 及以上，再探测共享 ONNX Runtime 是否能被加载。
+        let hr = initialize(0x0001_0008, std::ptr::null(), MIN_WINDOWS_ML_RUNTIME, 0);
         if hr < 0 {
             return Err(format!("Windows App SDK 1.8 bootstrap failed: 0x{hr:08x}"));
         }
@@ -144,6 +147,11 @@ pub(crate) async fn ensure_models(window: &WebviewWindow) -> Result<ModelPaths, 
  * @throws 下载、解包或缓存失败。
  */
 async fn ensure_models_in(root: &Path) -> Result<ModelPaths, String> {
+    // 串行首次下载与缓存发布，避免多个 OCR 请求同时改写相同模型文件。
+    let _guard = MODEL_LOCK
+        .get_or_init(|| tokio::sync::Mutex::new(()))
+        .lock()
+        .await;
     fs::create_dir_all(root).map_err(|error| error.to_string())?;
     let det = root.join("det.onnx");
     let rec = root.join("rec.onnx");
