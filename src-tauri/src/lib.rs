@@ -1,4 +1,5 @@
 mod backup;
+mod break_reminder;
 mod clipboard_images;
 mod commands;
 mod desktop;

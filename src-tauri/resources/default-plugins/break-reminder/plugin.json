@@ -1,0 +1,14 @@
+{
+  "name": "break-reminder",
+  "title": "休息提醒",
+  "description": "定时提醒休息，支持提前通知与跳过本次",
+  "version": "1.0.0",
+  "main": "index.html",
+  "features": [
+    {
+      "code": "settings",
+      "explain": "设置休息提醒的间隔与持续时间",
+      "cmds": ["休息提醒", "休息", "Break Reminder"]
+    }
+  ]
+}
