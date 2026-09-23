@@ -12,9 +12,9 @@ static OCR_BUSY: Mutex<()> = Mutex::new(());
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct OcrResult {
-    text: String,
-    language: String,
-    engine: &'static str,
+    pub(crate) text: String,
+    pub(crate) language: String,
+    pub(crate) engine: &'static str,
 }
 
 /**
@@ -61,12 +61,35 @@ pub(crate) async fn plugin_ocr(
     ) {
         return Err("OCR 语言无效".to_owned());
     }
+    #[cfg(target_os = "windows")]
+    let ml_models = if crate::windows_ml::is_available()
+        && matches!(language.as_str(), "auto" | "zh-Hans" | "en-US")
+    {
+        match crate::windows_ml::ensure_models(&window).await {
+            Ok(paths) => Some(paths),
+            Err(error) => {
+                eprintln!("[ocr] PP-OCRv6 model unavailable, using WinRT OCR: {error}");
+                None
+            }
+        }
+    } else {
+        None
+    };
     tauri::async_runtime::spawn_blocking(move || {
         // 串行限制识别任务；不让连续点击或多个插件堆积大图解码。
         let _guard = OCR_BUSY
             .try_lock()
             .map_err(|_| "正在识别其他图片，请稍后再试".to_owned())?;
         let image = decode_image(&data)?;
+        #[cfg(target_os = "windows")]
+        if let Some(paths) = ml_models {
+            match crate::windows_ml::recognize(image.clone(), &language, paths) {
+                Ok(result) => return Ok(result),
+                Err(error) => {
+                    eprintln!("[ocr] Windows ML inference failed, using WinRT OCR: {error}")
+                }
+            }
+        }
         recognize(image, &language)
     })
     .await
