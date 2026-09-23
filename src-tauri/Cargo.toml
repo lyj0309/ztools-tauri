@@ -25,8 +25,7 @@ enigo = "0.6.1"
 futures-util = "0.3"
 heed = "0.22"
 image = { version = "0.25", default-features = false, features = ["png"] }
-md-5 = "0.10.6"
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream", "multipart"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
 rfd = "0.15"
 rusqlite = { version = "0.40.2", features = ["backup", "bundled"] }
 semver = "1"

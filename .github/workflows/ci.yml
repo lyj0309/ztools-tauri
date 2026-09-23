@@ -56,4 +56,4 @@ jobs:
       - name: Test Rust
         run: cargo test --manifest-path src-tauri/Cargo.toml --all-features
       - name: Validate compatibility ledger
-        run: python3 -m json.tool docs/plugin-api-compatibility.json >/dev/null
+        run: python3 -c "import json; json.load(open('docs/plugin-api-compatibility.json', encoding='utf-8'))"

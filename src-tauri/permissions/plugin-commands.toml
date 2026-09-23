@@ -2,9 +2,6 @@
 identifier = "plugin-commands"
 description = "Allows plugin windows to use the initial audited ZTools compatibility API only."
 commands.allow = [
-  "plugin_read_clipboard_image",
-  "baidu_translate_text",
-  "baidu_translate_image",
   "plugin_ocr",
   "plugin_ocr_copy_text",
   "plugin_copy_text",

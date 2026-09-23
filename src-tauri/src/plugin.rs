@@ -39,14 +39,6 @@ const BUNDLED_PLUGIN_FILES: &[BundledPlugin] = &[
                 "index.html",
                 include_bytes!("../resources/default-plugins/baidu-translate/index.html"),
             ),
-            (
-                "style.css",
-                include_bytes!("../resources/default-plugins/baidu-translate/style.css"),
-            ),
-            (
-                "main.js",
-                include_bytes!("../resources/default-plugins/baidu-translate/main.js"),
-            ),
         ],
     ),
     (
@@ -1088,7 +1080,14 @@ fn locate_extracted_plugin(extracted: &Path) -> Result<PathBuf, String> {
     Ok(candidates[0].clone())
 }
 
-/// 创建或复用插件窗口，并向插件派发本次进入动作。
+/**
+ * 创建或复用插件窗口，并向插件派发本次进入动作。
+ * @param app 桌面应用句柄。
+ * @param runtime 插件运行时与隔离数据目录。
+ * @param plugin_name 已安装插件名称。
+ * @param action 本次进入的功能与数据。
+ * @returns 插件窗口显示完成，失败时返回原因。
+ */
 pub(crate) fn launch_plugin(
     app: &AppHandle,
     runtime: &PluginRuntime,
@@ -1098,6 +1097,10 @@ pub(crate) fn launch_plugin(
     validate_plugin_name(plugin_name)?;
     let plugin_directory = runtime.root().join(plugin_name);
     let manifest = read_manifest(&plugin_directory)?;
+    // 百度页面由网站自身处理匿名请求，不向外部网页注入本地插件桥。
+    if plugin_name == "baidu-translate" {
+        return launch_baidu_site(app, runtime, &manifest, &action);
+    }
     let preload_adapter = preload_adapter_script(&manifest, &plugin_directory)?;
     let label = plugin_window_label(plugin_name);
     let action_json = serde_json::to_string(&action).map_err(|error| error.to_string())?;
@@ -1219,6 +1222,99 @@ pub(crate) fn launch_plugin(
         runtime.unregister_instance(&label);
         let _ = restore_main_window(app);
         return Err(format!("无法显示插件窗口：{error}"));
+    }
+    Ok(())
+}
+
+/**
+ * 把百度翻译默认插件的功能限制到两个固定的官方页面。
+ * @param code 插件功能代码。
+ * @returns 对应页面的固定地址；其他功能返回错误。
+ */
+fn baidu_site_url(code: &str) -> Result<tauri::Url, String> {
+    let address = match code {
+        "text" => "https://fanyi.baidu.com/mtpe-individual/transText#/",
+        "image" => "https://fanyi.baidu.com/mtpe-individual/transImg",
+        _ => return Err("未知的百度翻译功能".to_owned()),
+    };
+    tauri::Url::parse(address).map_err(|error| format!("百度翻译地址无效：{error}"))
+}
+
+/**
+ * 在独立 WebView 中打开百度官网，让其自行调用匿名翻译接口和处理验证。
+ * @param app 桌面应用句柄。
+ * @param runtime 插件运行时与隔离数据目录。
+ * @param manifest 内置百度翻译插件声明。
+ * @param action 用户选择的文字或图片入口。
+ * @returns 官网窗口显示完成，失败时返回原因。
+ */
+fn launch_baidu_site(
+    app: &AppHandle,
+    runtime: &PluginRuntime,
+    manifest: &PluginManifest,
+    action: &PluginEnterAction,
+) -> Result<(), String> {
+    // 只接受内置 manifest 声明的功能，且外部 URL 由宿主固定映射。
+    if !manifest
+        .features
+        .iter()
+        .any(|feature| feature.code == action.code)
+    {
+        return Err("百度翻译插件未声明该功能".to_owned());
+    }
+    let url = baidu_site_url(&action.code)?;
+    let label = plugin_window_label(&manifest.name);
+    if let Some(window) = app.get_webview_window(&label) {
+        // 已打开的官网窗口切换到目标功能，保留它自身的站点会话。
+        window.navigate(url).map_err(|error| error.to_string())?;
+        hide_main_window(app)?;
+        window.show().map_err(|error| error.to_string())?;
+        window.set_focus().map_err(|error| error.to_string())?;
+        return Ok(());
+    }
+
+    let data_directory = runtime.root().join(".webview-data").join(&manifest.name);
+    fs::create_dir_all(&data_directory).map_err(|error| error.to_string())?;
+    // 完成资源准备后再登记窗口身份；创建失败时撤销登记。
+    runtime.register_instance(&label, &manifest.name)?;
+    let build_result = WebviewWindowBuilder::new(app, &label, WebviewUrl::External(url))
+        .title(&manifest.title)
+        .inner_size(1100.0, 760.0)
+        .min_inner_size(760.0, 520.0)
+        .center()
+        .data_directory(data_directory)
+        .build();
+    let window = match build_result {
+        Ok(window) => window,
+        Err(error) => {
+            runtime.unregister_instance(&label);
+            let _ = restore_main_window(app);
+            return Err(format!("无法创建百度翻译窗口：{error}"));
+        }
+    };
+    window.on_window_event({
+        let app = app.clone();
+        let label = label.clone();
+        move |event| {
+            if matches!(event, WindowEvent::Destroyed) {
+                let runtime = app.state::<PluginRuntime>();
+                let restore_main = runtime.restore_main_after_close(&label);
+                runtime.unregister_instance(&label);
+                if restore_main {
+                    let _ = restore_main_window(&app);
+                }
+            }
+        }
+    });
+    if let Err(error) = hide_main_window(app)
+        .and_then(|_| window.show().map_err(|error| error.to_string()))
+        .and_then(|_| window.set_focus().map_err(|error| error.to_string()))
+    {
+        // 显示失败时关闭孤儿窗口，并恢复主启动器。
+        let _ = window.close();
+        runtime.unregister_instance(&label);
+        let _ = restore_main_window(app);
+        return Err(format!("无法显示百度翻译窗口：{error}"));
     }
     Ok(())
 }
@@ -2212,6 +2308,27 @@ mod tests {
             "系统"
         );
         fs::remove_dir_all(root).expect("runtime fixture should clean up");
+    }
+
+    /**
+     * 确认百度翻译功能仅能导航到已审查的官网页面。
+     * @returns 测试断言通过后结束。
+     */
+    #[test]
+    fn baidu_site_urls_are_fixed() {
+        assert_eq!(
+            super::baidu_site_url("text")
+                .expect("text should resolve")
+                .as_str(),
+            "https://fanyi.baidu.com/mtpe-individual/transText#/"
+        );
+        assert_eq!(
+            super::baidu_site_url("image")
+                .expect("image should resolve")
+                .as_str(),
+            "https://fanyi.baidu.com/mtpe-individual/transImg"
+        );
+        assert!(super::baidu_site_url("https://example.com").is_err());
     }
 
     /// 验证目录安装使用 staging 发布，并允许新版本原子替换旧版本。
