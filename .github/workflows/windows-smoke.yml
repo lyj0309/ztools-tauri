@@ -342,7 +342,7 @@ jobs:
             # 原版标注工具栏点击贴图，旧版保留 P 快捷键；两者都覆盖二进制 IPC 和贴图窗口链路。
             [DesktopNative]::SetForegroundWindow($editor) | Out-Null
             if ($usesOriginalEditor) {
-              [DesktopNative]::SetCursorPos($editorRect.Right - 59, $editorRect.Bottom - 42) | Out-Null
+              [DesktopNative]::SetCursorPos($editorRect.Right - 83, $editorRect.Bottom - 42) | Out-Null
               [DesktopNative]::mouse_event(0x0002, 0, 0, 0, [UIntPtr]::Zero)
               [DesktopNative]::mouse_event(0x0004, 0, 0, 0, [UIntPtr]::Zero)
             } else {
