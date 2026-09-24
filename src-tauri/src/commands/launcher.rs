@@ -1,6 +1,8 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use tauri::{AppHandle, Manager, Monitor, PhysicalPosition, State, WebviewWindow};
+#[cfg(not(target_os = "linux"))]
+use tauri::LogicalSize;
+use tauri::{AppHandle, Manager, Monitor, PhysicalPosition, State, Webview};
 use tauri_plugin_autostart::ManagerExt as AutostartManagerExt;
 use tauri_plugin_global_shortcut::GlobalShortcutExt;
 
@@ -69,7 +71,7 @@ pub(crate) fn refresh_applications(state: State<'_, AppState>) -> Result<Launche
 pub(crate) fn launch_application(
     app_id: String,
     state: State<'_, AppState>,
-    window: WebviewWindow,
+    window: Webview,
 ) -> Result<(), String> {
     // 只允许启动宿主扫描到的记录，避免前端传入任意命令行。
     let app = state
@@ -105,7 +107,7 @@ pub(crate) fn launch_application(
         .record_launch(&app, timestamp)?;
 
     // 启动成功后释放前台焦点，让目标应用获得窗口焦点。
-    window.hide().map_err(|error| error.to_string())
+    window.window().hide().map_err(|error| error.to_string())
 }
 
 /// 更新应用收藏状态并返回最新收藏顺序。
@@ -176,7 +178,7 @@ pub(crate) fn capture_clipboard(state: State<'_, AppState>) -> Result<Vec<Clipbo
 #[tauri::command]
 pub(crate) async fn copy_clipboard_text(
     content: String,
-    window: WebviewWindow,
+    window: Webview,
     state: State<'_, AppState>,
 ) -> Result<(), String> {
     desktop::write_clipboard_text(content)?;
@@ -188,7 +190,7 @@ pub(crate) async fn copy_clipboard_text(
         .auto_paste;
     if auto_paste {
         // 先释放 command 执行线程，让窗口管理器有机会恢复原应用焦点。
-        window.hide().map_err(|error| error.to_string())?;
+        window.window().hide().map_err(|error| error.to_string())?;
         tauri::async_runtime::spawn_blocking(move || {
             std::thread::sleep(std::time::Duration::from_millis(120));
             desktop::simulate_paste()
@@ -394,13 +396,48 @@ fn is_hex_color(value: &str) -> bool {
 
 /// 隐藏当前主窗口。
 #[tauri::command]
-pub(crate) fn hide_main_window(window: WebviewWindow) -> Result<(), String> {
-    window.hide().map_err(|error| error.to_string())
+pub(crate) fn hide_main_window(window: Webview) -> Result<(), String> {
+    window.window().hide().map_err(|error| error.to_string())
+}
+
+/**
+ * 按搜索结果或插件工作区高度调整主窗口，兼容多 Webview 窗口。
+ * @param height 目标客户区高度。
+ * @param webview 发起请求的主视图。
+ * @returns 主窗口尺寸更新结果。
+ */
+#[tauri::command]
+pub(crate) fn resize_main_window(height: u32, webview: Webview) -> Result<(), String> {
+    if webview.label() != "main" || !(61..=600).contains(&height) {
+        return Err("主窗口尺寸请求无效".to_owned());
+    }
+    #[cfg(target_os = "linux")]
+    {
+        use gtk::prelude::*;
+
+        let parent = webview.window();
+        let task_window = parent.clone();
+        parent
+            .run_on_main_thread(move || {
+                // WebKitGTK 多视图关闭后会缓存自然高度；GDK 按实际内容尺寸更新窗口。
+                if let Ok(gtk_window) = task_window.gtk_window() {
+                    if let Some(gdk_window) = gtk_window.window() {
+                        gdk_window.resize(800, height as i32);
+                    }
+                }
+            })
+            .map_err(|error| error.to_string())
+    }
+    #[cfg(not(target_os = "linux"))]
+    webview
+        .window()
+        .set_size(LogicalSize::new(800.0, f64::from(height)))
+        .map_err(|error| error.to_string())
 }
 
 /// 显示主窗口、在鼠标所在屏幕顶部六分之一处水平居中并把焦点交给搜索页。
 pub(crate) fn show_main_window(app: &AppHandle) {
-    if let Some(window) = app.get_webview_window("main") {
+    if let Some(window) = app.get_window("main") {
         // 先显示以便窗口管理器提交最终尺寸，随后再计算跨屏物理位置。
         let _ = window.show();
         // 使用物理坐标匹配鼠标所在显示器，兼容负坐标与不同缩放比例。
@@ -444,7 +481,7 @@ fn monitor_containing_cursor(app: &AppHandle, x: f64, y: f64) -> Option<Monitor>
 
 /// 切换主窗口的显示状态，供全局快捷键处理器调用。
 pub(crate) fn toggle_main_window(app: &AppHandle) {
-    if let Some(window) = app.get_webview_window("main") {
+    if let Some(window) = app.get_window("main") {
         match window.is_visible() {
             Ok(true) => {
                 let _ = window.hide();

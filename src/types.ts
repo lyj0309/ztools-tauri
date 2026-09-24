@@ -105,6 +105,11 @@ export interface InstalledPlugin {
   builtIn: boolean
 }
 
+export interface InstalledPluginDetail {
+  readme: string
+  data: Array<{ key: string; kind: 'document' | 'storage' | 'attachment'; bytes: number }>
+}
+
 export interface MarketPlugin {
   name: string
   title: string

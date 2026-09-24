@@ -18,6 +18,7 @@ commands.allow = [
   "delete_local_shortcut",
   "update_launcher_settings",
   "hide_main_window",
+  "resize_main_window",
   "sync_now",
   "get_sync_status",
   "send_test_notification",
@@ -39,5 +40,9 @@ commands.allow = [
   "register_plugin_development",
   "stop_plugin_development",
   "uninstall_plugin",
-  "launch_plugin_feature"
+  "launch_plugin_feature",
+  "close_embedded_plugin",
+  "reveal_plugin_directory",
+  "get_installed_plugin_detail",
+  "list_running_plugins"
 ]

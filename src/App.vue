@@ -1,6 +1,5 @@
 <script setup lang="ts">
 import { getCurrentWebviewWindow } from '@tauri-apps/api/webviewWindow'
-import { LogicalSize } from '@tauri-apps/api/dpi'
 import { listen, type UnlistenFn } from '@tauri-apps/api/event'
 import { pinyin } from 'pinyin-pro'
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
@@ -13,12 +12,14 @@ import {
   checkForUpdates,
   clearClipboardHistory,
   clearLaunchHistory,
+  closeEmbeddedPlugin,
   copyClipboardText,
   createBackup,
   deleteLocalShortcut,
   deleteClipboardEntry,
   detectLegacyData,
   fetchPluginMarket,
+  getInstalledPluginDetail,
   hideMainWindow,
   importLegacyData,
   installPluginDirectory,
@@ -26,13 +27,16 @@ import {
   installUpdate,
   launchPluginFeature,
   listPlugins,
+  listRunningPlugins,
   launchApplication,
   openDroppedPath,
   openExternalUrl,
   refreshApplications,
   registerPluginDevelopment,
+  revealPluginDirectory,
   revealDroppedPath,
   restoreBackup,
+  resizeMainWindow,
   runSystemCommand,
   sendTestNotification,
   setApplicationPinned,
@@ -49,6 +53,7 @@ import type {
   LauncherSnapshot,
   LegacyImportReport,
   InstalledPlugin,
+  InstalledPluginDetail,
   MarketPlugin,
   MarketInstallProgress,
   SyncStatus,
@@ -63,6 +68,9 @@ const refreshing = ref(false)
 const launchingId = ref<string | null>(null)
 const errorMessage = ref('')
 const settingsOpen = ref(false)
+const activePlugin = ref<{ name: string; title: string } | null>(null)
+let unlistenPluginPanelOpen: UnlistenFn | undefined
+let unlistenPluginPanelClosed: UnlistenFn | undefined
 type SettingsSection = 'general' | 'appearance' | 'data' | 'plugins' | 'market' | 'services'
 const settingsSection = ref<SettingsSection>('general')
 const activeMode = ref<'apps' | 'plugins' | 'clipboard' | 'files'>('apps')
@@ -87,6 +95,16 @@ const legacyReport = ref<LegacyImportReport | null>(null)
 const plugins = ref<InstalledPlugin[]>([])
 const pluginInstallPath = ref('')
 const pluginBusy = ref('')
+const pluginFilter = ref<'all' | 'running' | 'updates'>('all')
+const pluginSearch = ref('')
+const selectedPlugin = ref<InstalledPlugin | null>(null)
+const selectedPluginDetail = ref<InstalledPluginDetail | null>(null)
+const selectedPluginDetailLoading = ref(false)
+const pluginDetailTab = ref<'detail' | 'commands' | 'data'>('detail')
+const runningPluginNames = ref<string[]>([])
+const pinnedPluginNames = ref<string[]>([])
+const installedMoreOpen = ref(false)
+const localInstallOpen = ref(false)
 const marketPlugins = ref<MarketPlugin[]>([])
 const marketQuery = ref('')
 const marketLoading = ref(false)
@@ -395,6 +413,7 @@ function pluginFeatureCode(plugin: InstalledPlugin, rawQuery: string): string {
 }
 
 const searchPlaceholder = computed(() => {
+  if (settingsOpen.value && settingsSection.value === 'plugins') return '搜索已安装插件...'
   if (activeMode.value === 'files') return '筛选已拖入文件'
   return '搜索应用和指令 / 粘贴文件或图片'
 })
@@ -406,22 +425,70 @@ const hasLauncherContent = computed(
 )
 
 /**
+ * 判断市场版本是否高于本地插件版本。
+ * @param installed 本地版本号。
+ * @param available 市场版本号。
+ * @returns 市场存在更新时为 true。
+ */
+function isPluginUpdateAvailable(installed: string, available: string): boolean {
+  const local = installed.split('.').map((part) => Number.parseInt(part, 10) || 0)
+  const remote = available.split('.').map((part) => Number.parseInt(part, 10) || 0)
+  for (let index = 0; index < Math.max(local.length, remote.length); index += 1) {
+    if ((remote[index] || 0) !== (local[index] || 0)) {
+      return (remote[index] || 0) > (local[index] || 0)
+    }
+  }
+  return false
+}
+
+const matchingInstalledPlugins = computed(() => {
+  const search = pluginSearch.value.trim().toLocaleLowerCase()
+  const list = plugins.value.filter((plugin) =>
+    `${plugin.title} ${plugin.name} ${plugin.description}`.toLocaleLowerCase().includes(search)
+  )
+  const filtered = list.filter((plugin) =>
+    pluginFilter.value === 'running'
+      ? runningPluginNames.value.includes(plugin.name)
+      : pluginFilter.value === 'updates'
+        ? marketPlugins.value.some((market) => market.name === plugin.name && isPluginUpdateAvailable(plugin.version, market.version))
+        : true
+  )
+  return filtered.sort((left, right) =>
+    Number(pinnedPluginNames.value.includes(right.name)) - Number(pinnedPluginNames.value.includes(left.name))
+  )
+})
+const installedUpdates = computed(() =>
+  plugins.value.filter((plugin) =>
+    marketPlugins.value.some((market) => market.name === plugin.name && isPluginUpdateAvailable(plugin.version, market.version))
+  )
+)
+const selectedMarketPlugin = computed(() =>
+  marketPlugins.value.find((plugin) => plugin.name === selectedPlugin.value?.name)
+)
+
+/**
  * 按原版 ZTools 的固定宽度和内容高度调整主窗口。
  * @returns 窗口尺寸更新完成后的 Promise。
  */
 async function resizeLauncherWindow(): Promise<void> {
-  // 设置插件始终使用原版 800×600 工作区；空搜索只保留 61 像素顶部栏。
+  // 设置页和普通插件共用原版 800×600 工作区；空搜索只保留顶部栏。
   let height = 61
-  if (settingsOpen.value) {
+  if (settingsOpen.value || activePlugin.value) {
     height = 600
   } else if (hasLauncherContent.value) {
     await nextTick()
-    const contentHeight = document.querySelector<HTMLElement>('.launcher-content')?.scrollHeight ?? 0
+    // Grid 容器会拉伸到旧窗口高度；用实际结果项底边计算内容高度才能收起插件工作区。
+    const content = document.querySelector<HTMLElement>('.launcher-content')
+    const contentTop = content?.getBoundingClientRect().top ?? 0
+    const items = content?.querySelectorAll<HTMLElement>('.results-panel > *, .error-banner') ?? []
+    const contentHeight = Math.ceil(
+      Math.max(0, ...Array.from(items, (item) => item.getBoundingClientRect().bottom - contentTop)) + 8
+    )
     height = Math.min(Math.max(61 + contentHeight, 145), 600)
   }
   try {
     // 开发热更新期间窗口可能正在销毁，尺寸同步失败不应中断界面渲染。
-    await getCurrentWebviewWindow().setSize(new LogicalSize(800, height))
+    await resizeMainWindow(height)
   } catch (error) {
     console.warn('同步启动器窗口尺寸失败', error)
   }
@@ -699,10 +766,11 @@ async function stopDevelopmentPlugin(pluginName: string): Promise<void> {
 
 /**
  * 从 Rust 宿主加载官方市场目录，重复打开时复用当前结果。
+ * @param selectSection 是否切换到市场页。
  * @returns 市场目录加载完成后的 Promise。
  */
-async function loadPluginMarket(): Promise<void> {
-  settingsSection.value = 'market'
+async function loadPluginMarket(selectSection = true): Promise<void> {
+  if (selectSection) settingsSection.value = 'market'
   if (marketPlugins.value.length || marketLoading.value) return
   marketLoading.value = true
   serviceMessage.value = ''
@@ -725,6 +793,9 @@ async function installMarketPlugin(pluginName: string): Promise<void> {
   serviceMessage.value = ''
   try {
     plugins.value = await installPluginFromMarket(pluginName)
+    if (selectedPlugin.value?.name === pluginName) {
+      selectedPlugin.value = plugins.value.find((plugin) => plugin.name === pluginName) || null
+    }
     // 安装成功不等于旧 Node preload 已适配，避免把暂不能运行的插件误报为可用。
     const installed = plugins.value.find((plugin) => plugin.name === pluginName)
     serviceMessage.value =
@@ -736,6 +807,32 @@ async function installMarketPlugin(pluginName: string): Promise<void> {
   } finally {
     pluginBusy.value = ''
   }
+}
+
+/**
+ * 顺序升级已安装插件，避免并行替换多个插件目录造成界面状态混乱。
+ * @returns 全部更新任务结束后的 Promise。
+ */
+async function updateAllInstalledPlugins(): Promise<void> {
+  const targets = [...installedUpdates.value]
+  if (!targets.length || pluginBusy.value) return
+  installedMoreOpen.value = false
+  let updated = 0
+  const failures: string[] = []
+  // 每个插件使用现有的市场下载与原子安装流程，单项失败不阻断其他更新。
+  for (const plugin of targets) {
+    pluginBusy.value = `market:${plugin.name}`
+    try {
+      plugins.value = await installPluginFromMarket(plugin.name)
+      updated += 1
+    } catch {
+      failures.push(plugin.title)
+    }
+  }
+  pluginBusy.value = ''
+  serviceMessage.value = failures.length
+    ? `已更新 ${updated} 个插件；失败：${failures.join('、')}`
+    : `已更新 ${updated} 个插件`
 }
 
 /**
@@ -823,6 +920,113 @@ async function runPlugin(plugin: InstalledPlugin): Promise<void> {
 }
 
 /**
+ * 关闭当前内嵌插件并回到主搜索界面。
+ * @returns 插件 Webview 关闭后的 Promise。
+ */
+async function closeActivePlugin(): Promise<void> {
+  const plugin = activePlugin.value
+  if (!plugin) return
+  // Rust 关闭视图并撤销插件身份后，由关闭事件同步界面状态。
+  await closeEmbeddedPlugin(plugin.name)
+  activePlugin.value = null
+  runningPluginNames.value = runningPluginNames.value.filter((name) => name !== plugin.name)
+  await resizeLauncherWindow()
+  void focusSearch()
+}
+
+/**
+ * 在顶栏输入新查询时退出当前插件页面。
+ * @returns 无返回值。
+ */
+function onSearchInput(): void {
+  selectedIndex.value = 0
+  if (settingsOpen.value && settingsSection.value === 'plugins') pluginSearch.value = query.value
+  if (activePlugin.value) void closeActivePlugin()
+}
+
+/**
+ * 切换已安装插件的置顶状态并保存到当前应用配置。
+ * @param pluginName 插件 manifest 名称。
+ * @returns 无返回值。
+ */
+function toggleInstalledPin(pluginName: string): void {
+  // 新置顶项排在最前，取消置顶时只移除当前名称。
+  pinnedPluginNames.value = pinnedPluginNames.value.includes(pluginName)
+    ? pinnedPluginNames.value.filter((name) => name !== pluginName)
+    : [pluginName, ...pinnedPluginNames.value]
+  localStorage.setItem('installed-plugin-pins', JSON.stringify(pinnedPluginNames.value))
+}
+
+/**
+ * 从已安装插件详情返回列表。
+ * @returns 无返回值。
+ */
+function closeInstalledDetail(): void {
+  selectedPlugin.value = null
+  selectedPluginDetail.value = null
+}
+
+/**
+ * 打开已安装插件的内嵌详情，并恢复原版默认详情页。
+ * @param plugin 要查看的插件。
+ * @returns 插件说明和数据目录加载后的 Promise。
+ */
+async function openInstalledDetail(plugin: InstalledPlugin): Promise<void> {
+  selectedPlugin.value = plugin
+  pluginDetailTab.value = 'detail'
+  selectedPluginDetail.value = null
+  selectedPluginDetailLoading.value = true
+  try {
+    // 只在用户打开详情时读取 README 和数据键，避免拖慢插件列表。
+    selectedPluginDetail.value = await getInstalledPluginDetail(plugin.name)
+  } catch (error) {
+    serviceMessage.value = String(error)
+  } finally {
+    selectedPluginDetailLoading.value = false
+  }
+}
+
+/**
+ * 停止当前运行的插件 Webview。
+ * @param pluginName 插件 manifest 名称。
+ * @returns 插件关闭后的 Promise。
+ */
+async function stopRunningPlugin(pluginName: string): Promise<void> {
+  try {
+    await closeEmbeddedPlugin(pluginName)
+    runningPluginNames.value = runningPluginNames.value.filter((name) => name !== pluginName)
+    if (activePlugin.value?.name === pluginName) activePlugin.value = null
+  } catch (error) {
+    serviceMessage.value = String(error)
+  }
+}
+
+/**
+ * 从 Rust 当前 Webview 实例同步已安装插件的运行状态。
+ * @returns 状态查询完成后的 Promise。
+ */
+async function refreshInstalledRunning(): Promise<void> {
+  try {
+    runningPluginNames.value = await listRunningPlugins()
+  } catch (error) {
+    serviceMessage.value = String(error)
+  }
+}
+
+/**
+ * 打开指定插件的安装目录并在页面中显示失败原因。
+ * @param pluginName 插件 manifest 名称。
+ * @returns 文件管理器调用完成后的 Promise。
+ */
+async function openInstalledFolder(pluginName: string): Promise<void> {
+  try {
+    await revealPluginDirectory(pluginName)
+  } catch (error) {
+    serviceMessage.value = String(error)
+  }
+}
+
+/**
  * 启动统一搜索结果中的系统应用或精确插件 feature。
  * @param result 统一结果模型。
  * @returns 启动请求完成后的 Promise。
@@ -890,6 +1094,7 @@ async function removePlugin(pluginName: string, removeData = false): Promise<voi
   serviceMessage.value = ''
   try {
     plugins.value = await uninstallPlugin(pluginName, removeData)
+    if (selectedPlugin.value?.name === pluginName) selectedPlugin.value = null
     serviceMessage.value = removeData ? '插件及其私有数据已删除' : '插件已卸载，私有数据已保留'
   } catch (error) {
     serviceMessage.value = String(error)
@@ -1213,6 +1418,23 @@ async function registerServiceEvents(): Promise<void> {
     // Rust 已校验分页标识，前端只负责切换现有设置界面。
     void openSettingsSection(event.payload)
   })
+  unlistenPluginPanelOpen = await listen<{ name: string; title: string }>(
+    'plugin-panel-open',
+    (event) => {
+      // 插件内容占用搜索框下方的工作区，宿主只保留顶栏和关闭入口。
+      activePlugin.value = event.payload
+      settingsOpen.value = false
+      if (!runningPluginNames.value.includes(event.payload.name)) {
+        runningPluginNames.value = [...runningPluginNames.value, event.payload.name]
+      }
+    }
+  )
+  unlistenPluginPanelClosed = await listen<string>('plugin-panel-closed', (event) => {
+    if (activePlugin.value?.name === event.payload) activePlugin.value = null
+    runningPluginNames.value = runningPluginNames.value.filter((name) => name !== event.payload)
+    // Linux 在销毁 GtkFixed 后才解除最小高度，下一帧重新计算搜索结果高度。
+    window.setTimeout(() => void resizeLauncherWindow(), 80)
+  })
   unlistenScreenshotFinished = await listen<{ action: string; path?: string | null }>(
     'screenshot-finished',
     (event) => {
@@ -1275,6 +1497,7 @@ function handleKeyboard(event: KeyboardEvent): void {
     }
   } else if (event.key === 'Escape') {
     if (settingsOpen.value) settingsOpen.value = false
+    else if (activePlugin.value) void closeActivePlugin()
     else void hideMainWindow()
   }
 }
@@ -1297,6 +1520,7 @@ function selectMode(mode: 'apps' | 'plugins' | 'clipboard' | 'files'): void {
  * @returns 无返回值。
  */
 function openSettings(): void {
+  if (activePlugin.value) void closeActivePlugin()
   settingsDraft.value = { ...snapshot.value.settings }
   settingsOpen.value = true
 }
@@ -1308,10 +1532,17 @@ function openSettings(): void {
  */
 async function openSettingsSection(section: SettingsSection): Promise<void> {
   // 打开面板前重新复制已保存值，避免保留上次取消编辑的草稿。
+  if (activePlugin.value) await closeActivePlugin()
   settingsDraft.value = { ...snapshot.value.settings }
   settingsSection.value = section
   settingsOpen.value = true
+  if (section === 'plugins') {
+    query.value = ''
+    pluginSearch.value = ''
+    await refreshInstalledRunning()
+  }
   if (section === 'market') await loadPluginMarket()
+  if (section === 'plugins') void loadPluginMarket(false)
 }
 
 /**
@@ -1386,6 +1617,7 @@ watch(
   [
     query,
     settingsOpen,
+    activePlugin,
     activeMode,
     loading,
     errorMessage,
@@ -1402,6 +1634,14 @@ watch(settingsDraft, scheduleSettingsSave, { deep: true, flush: 'sync' })
 
 onMounted(() => {
   // 首帧先恢复原版单行启动器尺寸，再异步加载内容。
+  try {
+    const savedPins = JSON.parse(localStorage.getItem('installed-plugin-pins') || '[]')
+    pinnedPluginNames.value = Array.isArray(savedPins)
+      ? savedPins.filter((name): name is string => typeof name === 'string')
+      : []
+  } catch {
+    pinnedPluginNames.value = []
+  }
   void resizeLauncherWindow()
   void loadLauncher()
   void registerDragAndDrop()
@@ -1419,6 +1659,8 @@ onUnmounted(() => {
   unlistenMarketProgress?.()
   unlistenPluginDevelopment?.()
   unlistenOpenSettings?.()
+  unlistenPluginPanelOpen?.()
+  unlistenPluginPanelClosed?.()
   unlistenScreenshotFinished?.()
   if (settingsSaveTimer) clearTimeout(settingsSaveTimer)
   window.removeEventListener('focus', handleWindowFocus)
@@ -1442,16 +1684,18 @@ onUnmounted(() => {
           spellcheck="false"
           :placeholder="searchPlaceholder"
           :aria-label="searchPlaceholder"
-          @input="selectedIndex = 0"
+          @input="onSearchInput"
         />
       </div>
+      <span v-if="activePlugin" class="active-plugin-title">{{ activePlugin.title }}</span>
+      <button v-if="activePlugin" type="button" class="active-plugin-close" title="关闭插件" @click="closeActivePlugin">×</button>
       <span v-if="query" class="tab-hint">切换选中 <kbd>Tab</kbd></span>
       <button class="profile-button" title="设置" @click="openSettings">
         <img :src="ztoolsLogo" alt="ZTools" />
       </button>
     </section>
 
-    <section v-if="hasLauncherContent" class="launcher-content" aria-live="polite">
+    <section v-if="hasLauncherContent && !settingsOpen && !activePlugin" class="launcher-content" aria-live="polite">
       <p v-if="errorMessage" class="error-banner">{{ errorMessage }}</p>
       <div class="results-panel">
       <div v-if="loading" class="empty-state">
@@ -1643,7 +1887,7 @@ onUnmounted(() => {
       <strong>松开以添加文件</strong>
     </div>
 
-    <div v-if="settingsOpen" class="modal-backdrop" @click.self="settingsOpen = false">
+    <div v-if="settingsOpen" class="settings-workspace">
       <form class="settings-card" @submit.prevent="saveSettings">
         <header>
           <div class="settings-plugin-tabs">
@@ -1678,13 +1922,13 @@ onUnmounted(() => {
           <button
             type="button"
             :class="{ active: settingsSection === 'plugins' }"
-            @click="settingsSection = 'plugins'"
+            @click="settingsSection = 'plugins'; query = ''; pluginSearch = ''; refreshInstalledRunning(); loadPluginMarket(false)"
             ><span>⌘</span>已安装插件</button
           >
           <button
             type="button"
             :class="{ active: settingsSection === 'market' }"
-            @click="loadPluginMarket"
+            @click="loadPluginMarket()"
             ><span>▣</span>插件市场</button
           >
           <button
@@ -1818,87 +2062,129 @@ onUnmounted(() => {
           <p v-if="serviceMessage" class="service-message">{{ serviceMessage }}</p>
         </section>
 
-        <section v-else-if="settingsSection === 'plugins'" class="settings-body">
-          <h3 class="settings-section-title">已安装插件</h3>
-          <div class="settings-subtitle">本地插件</div>
-          <label class="field-row field-row-wide">
-            <span>插件目录</span>
-            <input
-              v-model.trim="pluginInstallPath"
-              placeholder="/绝对路径/插件目录"
-              data-testid="plugin-install-path"
-            />
-          </label>
-          <div class="service-row">
-            <span>
-              <strong>安装或升级</strong>
-              <small>Rust 校验 plugin.json 后复制到隔离插件目录</small>
-            </span>
-            <button
-              type="button"
-              :disabled="pluginBusy === 'install' || !pluginInstallPath.trim()"
-              data-testid="plugin-install-button"
-              @click="installLocalPlugin"
-              >{{ pluginBusy === 'install' ? '安装中…' : '安装目录' }}</button
-            >
-          </div>
-          <div class="service-row">
-            <span>
-              <strong>开发目录热重载</strong>
-              <small>同步到隔离副本；页面文件稳定变化后自动刷新活动插件</small>
-            </span>
-            <button
-              type="button"
-              :disabled="pluginBusy === 'development' || !pluginInstallPath.trim()"
-              @click="registerDevelopmentPlugin"
-              >{{ pluginBusy === 'development' ? '注册中…' : '注册开发目录' }}</button
-            >
-          </div>
-          <div v-if="plugins.length === 0" class="settings-empty">尚未安装插件</div>
-          <div v-for="plugin in plugins" :key="plugin.name" class="plugin-editor">
-            <span>
-              <strong>{{ plugin.title }}</strong>
-              <small>
-                {{ plugin.name }} · {{ plugin.version }}
-                <template v-if="plugin.builtIn"> · 内置</template>
-                <template v-if="plugin.development"> · 开发监听中</template>
-              </small>
-              <small v-for="note in plugin.compatibilityNotes" :key="note">{{ note }}</small>
-            </span>
-            <div class="plugin-actions">
-              <button
-                type="button"
-                :disabled="pluginBusy === plugin.name || plugin.compatibility === 'needs-adaptation'"
-                @click="runPlugin(plugin)"
-              >
-                {{ plugin.compatibility === 'needs-adaptation' ? '需适配' : '运行' }}
-              </button>
-              <button
-                v-if="plugin.development"
-                type="button"
-                :disabled="pluginBusy === `development:${plugin.name}`"
-                @click="stopDevelopmentPlugin(plugin.name)"
-                >停止监听</button
-              >
-              <button
-                v-if="!plugin.builtIn"
-                type="button"
-                class="danger-text"
-                :disabled="pluginBusy === plugin.name"
-                @click="removePlugin(plugin.name)"
-                >卸载</button
-              >
-              <button
-                v-if="!plugin.builtIn"
-                type="button"
-                class="danger-text"
-                :disabled="pluginBusy === plugin.name"
-                @click="removePluginWithData(plugin.name)"
-                >卸载并删数据</button
-              >
+        <section v-else-if="settingsSection === 'plugins'" class="settings-body installed-plugins-page">
+          <template v-if="!selectedPlugin">
+            <div class="installed-toolbar">
+              <div class="installed-filters" role="tablist" aria-label="插件状态">
+                <button type="button" :class="{ active: pluginFilter === 'all' }" @click="pluginFilter = 'all'">
+                  全部 <span>{{ plugins.length }}</span>
+                </button>
+                <button type="button" :class="{ active: pluginFilter === 'running' }" @click="pluginFilter = 'running'">
+                  运行中 <span>{{ runningPluginNames.length }}</span>
+                </button>
+                <button type="button" :class="{ active: pluginFilter === 'updates' }" @click="pluginFilter = 'updates'">
+                  更新 <span :class="{ 'has-updates': installedUpdates.length > 0 }">{{ installedUpdates.length }}</span>
+                </button>
+              </div>
+              <div class="installed-more-wrap">
+                <button type="button" class="installed-more-button" @click="installedMoreOpen = !installedMoreOpen">更多 <span>⌄</span></button>
+                <div v-if="installedMoreOpen" class="installed-more-menu">
+                  <button type="button" @click="localInstallOpen = true; installedMoreOpen = false">▣　导入本地插件</button>
+                  <button type="button" :disabled="installedUpdates.length === 0 || !!pluginBusy" @click="updateAllInstalledPlugins">↻　全部更新 ({{ installedUpdates.length }})</button>
+                  <button type="button" :disabled="runningPluginNames.length === 0" @click="runningPluginNames.forEach((name) => stopRunningPlugin(name)); installedMoreOpen = false">■　停止所有插件</button>
+                </div>
+              </div>
             </div>
-          </div>
-          <p v-if="serviceMessage" class="service-message">{{ serviceMessage }}</p>
+            <div v-if="localInstallOpen" class="installed-import-panel">
+              <div class="installed-import-heading"><strong>导入本地插件</strong><button type="button" @click="localInstallOpen = false">×</button></div>
+              <input v-model.trim="pluginInstallPath" placeholder="包含 plugin.json 的插件目录绝对路径" data-testid="plugin-install-path" />
+              <div class="installed-import-actions">
+                <button type="button" :disabled="!pluginInstallPath || !!pluginBusy" data-testid="plugin-install-button" @click="installLocalPlugin">{{ pluginBusy === 'install' ? '安装中…' : '安装插件' }}</button>
+                <button type="button" :disabled="!pluginInstallPath || !!pluginBusy" @click="registerDevelopmentPlugin">{{ pluginBusy === 'development' ? '注册中…' : '注册开发目录' }}</button>
+              </div>
+            </div>
+            <div class="installed-list">
+              <div
+                v-for="plugin in matchingInstalledPlugins"
+                :key="plugin.name"
+                class="installed-plugin-card"
+                :title="plugin.description"
+                @click="openInstalledDetail(plugin)"
+              >
+                <div class="installed-icon-wrap">
+                  <img v-if="plugin.logoUrl" :src="plugin.logoUrl" class="installed-plugin-icon" alt="插件图标" draggable="false" />
+                  <div v-else class="installed-plugin-placeholder">🧩</div>
+                  <span v-if="plugin.development" class="installed-dev-badge">DEV</span>
+                  <span v-if="installedUpdates.some((entry) => entry.name === plugin.name)" class="installed-update-dot"></span>
+                </div>
+                <div class="installed-plugin-info">
+                  <div class="installed-plugin-name">{{ plugin.title || plugin.name }} <span class="installed-version">v{{ plugin.version }}</span>
+                    <span v-if="runningPluginNames.includes(plugin.name)" class="installed-running"><i></i>运行中</span>
+                  </div>
+                  <div class="installed-plugin-description">{{ plugin.description || '暂无描述' }}</div>
+                </div>
+                <div class="installed-plugin-actions">
+                  <button type="button" title="打开插件" :disabled="plugin.compatibility === 'needs-adaptation'" @click.stop="runPlugin(plugin)">▶</button>
+                  <button v-if="runningPluginNames.includes(plugin.name)" type="button" title="终止运行" @click.stop="stopRunningPlugin(plugin.name)">■</button>
+                  <button type="button" title="打开插件目录" @click.stop="openInstalledFolder(plugin.name)">▣</button>
+                  <button type="button" :title="pinnedPluginNames.includes(plugin.name) ? '取消置顶' : '置顶'" :class="{ pinned: pinnedPluginNames.includes(plugin.name) }" @click.stop="toggleInstalledPin(plugin.name)">♙</button>
+                </div>
+              </div>
+              <div v-if="matchingInstalledPlugins.length === 0" class="installed-empty">
+                <div>🧩</div>
+                <strong>{{ plugins.length === 0 ? '暂无插件' : pluginFilter === 'updates' ? '全部插件均为最新版本' : pluginFilter === 'running' ? '没有运行中的插件' : '未找到匹配的插件' }}</strong>
+                <small>{{ plugins.length === 0 ? '点击“导入本地插件”来安装你的第一个插件' : pluginFilter === 'updates' ? '有新版本的插件会出现在这里' : '尝试使用其他关键词搜索' }}</small>
+              </div>
+            </div>
+          </template>
+          <template v-else>
+            <div class="installed-detail-topbar">
+              <button type="button" class="installed-back" @click="closeInstalledDetail">‹ <span>插件详情</span></button>
+              <div class="installed-detail-actions">
+                <button type="button" title="打开" :disabled="selectedPlugin.compatibility === 'needs-adaptation'" @click="runPlugin(selectedPlugin)">▶</button>
+                <button v-if="runningPluginNames.includes(selectedPlugin.name)" type="button" title="终止运行" @click="stopRunningPlugin(selectedPlugin.name)">■</button>
+                <button type="button" title="打开插件目录" @click="openInstalledFolder(selectedPlugin.name)">▣</button>
+                <button type="button" :title="pinnedPluginNames.includes(selectedPlugin.name) ? '取消置顶' : '置顶'" @click="toggleInstalledPin(selectedPlugin.name)">♙</button>
+                <button v-if="!selectedPlugin.builtIn" type="button" title="卸载" @click="removePlugin(selectedPlugin.name)">▤</button>
+              </div>
+            </div>
+            <div class="installed-detail-content">
+              <div class="installed-detail-heading">
+                <img v-if="selectedPlugin.logoUrl" :src="selectedPlugin.logoUrl" alt="插件图标" draggable="false" />
+                <div v-else class="installed-detail-placeholder">🧩</div>
+                <div><h3>{{ selectedPlugin.title }}</h3><p>{{ selectedPlugin.description || '暂无描述' }}</p></div>
+                <button v-if="selectedMarketPlugin && isPluginUpdateAvailable(selectedPlugin.version, selectedMarketPlugin.version)" type="button" @click="installMarketPlugin(selectedPlugin.name)">更新</button>
+              </div>
+              <div class="installed-detail-meta">
+                <div><small>开发者</small><strong>{{ selectedMarketPlugin?.author || '-' }}</strong></div>
+                <div><small>版本</small><strong>{{ selectedPlugin.version }}</strong></div>
+                <div><small>状态</small><strong>{{ runningPluginNames.includes(selectedPlugin.name) ? '运行中' : '已安装' }}</strong></div>
+              </div>
+              <div class="installed-detail-tabs">
+                <button type="button" :class="{ active: pluginDetailTab === 'detail' }" @click="pluginDetailTab = 'detail'">详情</button>
+                <button type="button" :class="{ active: pluginDetailTab === 'commands' }" @click="pluginDetailTab = 'commands'">指令</button>
+                <button type="button" :class="{ active: pluginDetailTab === 'data' }" @click="pluginDetailTab = 'data'">数据</button>
+              </div>
+              <div v-if="pluginDetailTab === 'detail'" class="installed-detail-tab-content">
+                <p v-if="selectedPluginDetailLoading">加载中...</p>
+                <pre v-else-if="selectedPluginDetail?.readme" class="installed-readme">{{ selectedPluginDetail.readme }}</pre>
+                <p v-else>{{ selectedPlugin.description || '该插件暂无详情说明' }}</p>
+                <small v-for="note in selectedPlugin.compatibilityNotes" :key="note">{{ note }}</small>
+                <button v-if="selectedPlugin.development" type="button" @click="stopDevelopmentPlugin(selectedPlugin.name)">停止开发目录监听</button>
+              </div>
+              <div v-else-if="pluginDetailTab === 'commands'" class="installed-detail-tab-content">
+                <div v-for="feature in selectedPlugin.features" :key="feature.code" class="installed-feature-card">
+                  <div><strong>{{ feature.explain || feature.code }}</strong><small>{{ feature.code }}</small></div>
+                  <button type="button" :disabled="selectedPlugin.compatibility === 'needs-adaptation'" @click="launchPluginFeature(selectedPlugin.name, feature.code)">打开</button>
+                </div>
+                <p v-if="selectedPlugin.features.length === 0">该插件暂无指令</p>
+              </div>
+              <div v-else class="installed-detail-tab-content">
+                <p v-if="selectedPluginDetailLoading">加载中...</p>
+                <template v-else-if="selectedPluginDetail?.data.length">
+                  <div v-for="item in selectedPluginDetail.data" :key="`${item.kind}:${item.key}`" class="installed-data-row">
+                    <span><strong>{{ item.key }}</strong><small>{{ item.kind === 'document' ? '文档' : item.kind === 'storage' ? '键值存储' : '附件' }}</small></span>
+                    <small>{{ formatPluginSize(item.bytes) }}</small>
+                  </div>
+                </template>
+                <p v-else>该插件暂无数据</p>
+              </div>
+              <div v-if="!selectedPlugin.builtIn" class="installed-detail-footer">
+                <button type="button" @click="removePluginWithData(selectedPlugin.name)">卸载并删除插件数据</button>
+              </div>
+            </div>
+          </template>
+          <p v-if="serviceMessage" class="service-message installed-feedback">{{ serviceMessage }}</p>
         </section>
 
         <section v-else-if="settingsSection === 'market'" class="settings-body">

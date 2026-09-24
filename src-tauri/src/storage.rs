@@ -1,6 +1,7 @@
 use std::{fs, path::Path, time::Duration};
 
 use rusqlite::{backup::Backup, params, Connection};
+use serde::Serialize;
 
 use crate::models::{AppEntry, ClipboardEntry, HistoryEntry, LauncherSettings, LocalShortcut};
 use crate::sync::SyncDocument;
@@ -17,6 +18,14 @@ const CLIPBOARD_IMAGE_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS clipboard_image
 
 pub(crate) struct Store {
     connection: Connection,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct PluginDataItem {
+    pub(crate) key: String,
+    pub(crate) kind: String,
+    pub(crate) bytes: u64,
 }
 
 impl Store {
@@ -523,6 +532,35 @@ impl Store {
             serde_json::from_str(&value).map_err(|error| error.to_string())
         })
         .collect()
+    }
+
+    /**
+     * 只读取指定插件数据的键和大小，供详情页展示而不加载附件内容。
+     * @param plugin_name 插件 manifest 名称。
+     * @returns 文档、键值和附件的元数据列表。
+     */
+    pub(crate) fn plugin_data_items(
+        &self,
+        plugin_name: &str,
+    ) -> Result<Vec<PluginDataItem>, String> {
+        // 使用 SQLite length 聚合，避免打开详情时把大附件复制到前端。
+        let mut statement = self.connection.prepare(
+            "SELECT document_id, 'document', length(value) FROM plugin_documents WHERE plugin_name = ?1
+             UNION ALL SELECT storage_key, 'storage', length(value) FROM plugin_storage WHERE plugin_name = ?2
+             UNION ALL SELECT attachment_id, 'attachment', length(data) FROM plugin_attachments WHERE plugin_name = ?3
+             ORDER BY 2, 1"
+        ).map_err(|error| error.to_string())?;
+        let rows = statement
+            .query_map(params![plugin_name, plugin_name, plugin_name], |row| {
+                Ok(PluginDataItem {
+                    key: row.get(0)?,
+                    kind: row.get(1)?,
+                    bytes: row.get::<_, i64>(2)?.max(0) as u64,
+                })
+            })
+            .map_err(|error| error.to_string())?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(|error| error.to_string())
     }
 
     /// 新增或替换指定插件的 JSON 文档。
@@ -1096,6 +1134,23 @@ mod tests {
             .plugin_documents("fixture")
             .expect("plugin documents should load");
         assert_eq!(documents[0]["value"], 42);
+        let data_items = reopened
+            .plugin_data_items("fixture")
+            .expect("plugin data metadata should load");
+        assert_eq!(data_items.len(), 3);
+        assert!(data_items
+            .iter()
+            .any(|item| item.kind == "document" && item.key == "paper/1"));
+        assert!(data_items
+            .iter()
+            .any(|item| item.kind == "storage" && item.key == "preferences"));
+        assert!(data_items
+            .iter()
+            .any(|item| item.kind == "attachment" && item.key == "image/1" && item.bytes == 4));
+        assert!(reopened
+            .plugin_data_items("other-plugin")
+            .unwrap()
+            .is_empty());
         assert!(reopened
             .plugin_documents("other-plugin")
             .expect("other plugin documents should load")

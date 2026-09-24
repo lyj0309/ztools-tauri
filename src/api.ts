@@ -6,6 +6,7 @@ import type {
   LauncherSettings,
   LauncherSnapshot,
   InstalledPlugin,
+  InstalledPluginDetail,
   MarketPlugin,
   RestoreReport,
   SyncStatus,
@@ -318,11 +319,11 @@ export function uninstallPlugin(
 }
 
 /**
- * 创建或复用独立插件 Webview，并派发功能进入动作。
+ * 创建或复用主窗口内嵌插件 Webview，并派发功能进入动作。
  * @param pluginName 要启动的插件名称。
  * @param featureCode 要触发的功能编码。
  * @param payload 传给 onPluginEnter 的输入数据。
- * @returns 插件窗口完成显示后的 Promise。
+ * @returns 插件页面完成显示后的 Promise。
  */
 export function launchPluginFeature(
   pluginName: string,
@@ -330,4 +331,48 @@ export function launchPluginFeature(
   payload: unknown = null
 ): Promise<void> {
   return invoke<void>('launch_plugin_feature', { pluginName, featureCode, payload })
+}
+
+/**
+ * 关闭主窗口中的插件页面并撤销它的 API 身份。
+ * @param pluginName 要关闭的插件名称。
+ * @returns 页面关闭后的 Promise。
+ */
+export function closeEmbeddedPlugin(pluginName: string): Promise<void> {
+  return invoke<void>('close_embedded_plugin', { pluginName })
+}
+
+/**
+ * 按当前搜索或插件工作区高度调整主窗口。
+ * @param height 61 到 600 像素的目标高度。
+ * @returns 尺寸调整完成后的 Promise。
+ */
+export function resizeMainWindow(height: number): Promise<void> {
+  return invoke<void>('resize_main_window', { height })
+}
+
+/**
+ * 在系统文件管理器中打开指定插件的安装目录。
+ * @param pluginName 插件 manifest 名称。
+ * @returns 文件管理器打开后的 Promise。
+ */
+export function revealPluginDirectory(pluginName: string): Promise<void> {
+  return invoke<void>('reveal_plugin_directory', { pluginName })
+}
+
+/**
+ * 读取插件 README 和私有数据项的键及大小。
+ * @param pluginName 插件 manifest 名称。
+ * @returns 插件详情内容。
+ */
+export function getInstalledPluginDetail(pluginName: string): Promise<InstalledPluginDetail> {
+  return invoke<InstalledPluginDetail>('get_installed_plugin_detail', { pluginName })
+}
+
+/**
+ * 查询当前仍有 Webview 实例的插件名称。
+ * @returns 运行中插件名称列表。
+ */
+export function listRunningPlugins(): Promise<string[]> {
+  return invoke<string[]>('list_running_plugins')
 }

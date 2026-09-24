@@ -13,7 +13,7 @@ use serde::Serialize;
 use tauri::{
     ipc::{InvokeBody, Request, Response},
     AppHandle, Emitter, Manager, PhysicalPosition, PhysicalSize, WebviewUrl, WebviewWindow,
-    WebviewWindowBuilder, WindowEvent,
+    WebviewWindowBuilder, Window, WindowEvent,
 };
 
 use crate::desktop;
@@ -121,7 +121,7 @@ pub(crate) struct ScreenshotEditorInfo {
  * @param main 发起截图的启动器窗口。
  * @returns 编辑器创建结果，抓屏失败时恢复启动器。
  */
-pub(crate) async fn start_editor(app: AppHandle, main: WebviewWindow) -> Result<(), String> {
+pub(crate) async fn start_editor(app: AppHandle, main: Window) -> Result<(), String> {
     if main.label() != "main" {
         return Err("只有主启动器可以发起截图".to_owned());
     }
@@ -197,7 +197,7 @@ pub(crate) async fn start_editor(app: AppHandle, main: WebviewWindow) -> Result<
         .and_then(|_| editor.set_size(PhysicalSize::new(monitor_size.width, monitor_size.height)));
     let prepare_result = prepare_result
         .map_err(|error| error.to_string())
-        .and_then(|_| set_window_transitions(&editor, false));
+        .and_then(|_| set_window_transitions(&editor.as_ref().window(), false));
     if let Err(error) = prepare_result {
         // 创建后的任一步失败都销毁半成品窗口并恢复启动器。
         let _ = editor.close();
@@ -384,7 +384,7 @@ async fn create_pin(
         .set_position(position)
         .and_then(|_| pin.set_size(size))
         .map_err(|error| error.to_string())
-        .and_then(|_| set_window_transitions(&pin, false))
+        .and_then(|_| set_window_transitions(&pin.as_ref().window(), false))
     {
         // 贴图未能显示时回收动态窗口及其临时文件。
         let _ = pin.close();
@@ -445,7 +445,7 @@ pub(crate) async fn screenshot_pin_resize(
  * @param enabled 是否允许系统过渡。
  * @returns 设置结果。
  */
-fn set_window_transitions(window: &WebviewWindow, enabled: bool) -> Result<(), String> {
+fn set_window_transitions(window: &Window, enabled: bool) -> Result<(), String> {
     #[cfg(target_os = "windows")]
     {
         use std::ffi::c_void;
@@ -494,7 +494,7 @@ fn flush_capture_frame() {
  * @param main 发起操作的启动器窗口。
  * @returns 选择窗口创建完成后的结果。
  */
-pub(crate) async fn start_history(app: AppHandle, main: WebviewWindow) -> Result<(), String> {
+pub(crate) async fn start_history(app: AppHandle, main: Window) -> Result<(), String> {
     if main.label() != "main" {
         return Err("只有启动器可以打开图片历史".to_owned());
     }
@@ -525,7 +525,7 @@ pub(crate) async fn start_history(app: AppHandle, main: WebviewWindow) -> Result
             monitor.position().y + ((f64::from(monitor.size().height) - height) / 2.0) as i32,
         ))
         .map_err(|e| e.to_string())
-        .and_then(|_| set_window_transitions(&picker, false));
+        .and_then(|_| set_window_transitions(&picker.as_ref().window(), false));
     if let Err(error) = prepared {
         let _ = picker.close();
         return Err(error);

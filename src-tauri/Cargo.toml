@@ -1,6 +1,6 @@
 [package]
 name = "ztools-tauri"
-version = "0.1.17"
+version = "0.1.18"
 description = "ZTools Tauri desktop host"
 authors = ["ZToolsCenter"]
 license = "MIT"
@@ -32,7 +32,7 @@ semver = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
-tauri = { version = "2", features = ["tray-icon"] }
+tauri = { version = "2", features = ["tray-icon", "unstable"] }
 tauri-plugin-autostart = "2"
 tauri-plugin-global-shortcut = "2"
 tauri-plugin-notification = "2"

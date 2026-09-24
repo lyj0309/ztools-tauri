@@ -1,6 +1,6 @@
 use std::{fs, path::PathBuf};
 
-use tauri::{AppHandle, Emitter, Manager, State, WebviewWindow};
+use tauri::{AppHandle, Emitter, Manager, State, Webview};
 use tauri_plugin_notification::{NotificationExt, PermissionState};
 
 #[derive(Debug, serde::Serialize)]
@@ -47,7 +47,15 @@ use crate::{
         self, InstalledPlugin, MarketPlugin, PluginEnterAction, PluginFeature, PluginRuntime,
     },
     state::AppState,
+    storage::PluginDataItem,
 };
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct InstalledPluginDetail {
+    readme: String,
+    data: Vec<PluginDataItem>,
+}
 
 /// 把宿主纯文本记录转换为旧剪贴板插件可识别的项目结构。
 fn clipboard_item(entry: ClipboardEntry) -> serde_json::Value {
@@ -205,7 +213,7 @@ pub(crate) async fn launch_plugin_feature(
             return Err("未知的截图插件功能".to_owned());
         }
         let main = app
-            .get_webview_window("main")
+            .get_window("main")
             .ok_or_else(|| "主启动器窗口不存在".to_owned())?;
         // 默认截图插件由宿主先隐藏启动器并抓取屏幕，再加载插件自带编辑界面。
         if feature_code == "pin" {
@@ -218,7 +226,7 @@ pub(crate) async fn launch_plugin_feature(
     if plugin_name == "system" {
         // 系统插件只转发 manifest 中声明的固定命令，由 Rust 白名单完成最终校验。
         crate::commands::system::run_system_command(feature_code, app.clone())?;
-        if let Some(window) = app.get_webview_window("main") {
+        if let Some(window) = app.get_window("main") {
             window.hide().map_err(|error| error.to_string())?;
         }
         return Ok(());
@@ -241,7 +249,7 @@ pub(crate) async fn launch_plugin_feature(
 pub(crate) async fn plugin_copy_text(
     content: String,
     should_paste: bool,
-    window: WebviewWindow,
+    window: Webview,
     runtime: State<'_, PluginRuntime>,
 ) -> Result<(), String> {
     let plugin_name = runtime.plugin_for_window(window.label())?;
@@ -252,7 +260,7 @@ pub(crate) async fn plugin_copy_text(
     eprintln!("[plugin] clipboard write succeeded for {plugin_name}");
     if should_paste {
         // 隐藏插件窗口并稍候，让原前台应用恢复后再发送粘贴组合键。
-        window.hide().map_err(|error| error.to_string())?;
+        window.window().hide().map_err(|error| error.to_string())?;
         tauri::async_runtime::spawn_blocking(|| {
             std::thread::sleep(std::time::Duration::from_millis(120));
             desktop::simulate_paste()
@@ -269,7 +277,7 @@ pub(crate) fn plugin_clipboard_get_history(
     page: usize,
     page_size: usize,
     kind: Option<String>,
-    window: WebviewWindow,
+    window: Webview,
     runtime: State<'_, PluginRuntime>,
     state: State<'_, AppState>,
 ) -> Result<serde_json::Value, String> {
@@ -304,7 +312,7 @@ pub(crate) fn plugin_clipboard_get_history(
 #[tauri::command]
 pub(crate) fn plugin_clipboard_search(
     query: String,
-    window: WebviewWindow,
+    window: Webview,
     runtime: State<'_, PluginRuntime>,
     state: State<'_, AppState>,
 ) -> Result<Vec<serde_json::Value>, String> {
@@ -329,7 +337,7 @@ pub(crate) fn plugin_clipboard_search(
 #[tauri::command]
 pub(crate) fn plugin_clipboard_delete(
     id: i64,
-    window: WebviewWindow,
+    window: Webview,
     app: AppHandle,
     runtime: State<'_, PluginRuntime>,
     state: State<'_, AppState>,
@@ -349,7 +357,7 @@ pub(crate) fn plugin_clipboard_delete(
 /// 清空宿主剪贴板历史，并通知主窗口刷新列表。
 #[tauri::command]
 pub(crate) fn plugin_clipboard_clear(
-    window: WebviewWindow,
+    window: Webview,
     app: AppHandle,
     runtime: State<'_, PluginRuntime>,
     state: State<'_, AppState>,
@@ -370,7 +378,7 @@ pub(crate) fn plugin_clipboard_clear(
 pub(crate) async fn plugin_clipboard_write_history(
     id: i64,
     should_paste: bool,
-    window: WebviewWindow,
+    window: Webview,
     runtime: State<'_, PluginRuntime>,
     state: State<'_, AppState>,
 ) -> Result<bool, String> {
@@ -386,7 +394,7 @@ pub(crate) async fn plugin_clipboard_write_history(
         .ok_or_else(|| "剪贴板历史记录不存在".to_owned())?;
     desktop::write_clipboard_text(content)?;
     if should_paste {
-        window.hide().map_err(|error| error.to_string())?;
+        window.window().hide().map_err(|error| error.to_string())?;
         tauri::async_runtime::spawn_blocking(|| {
             std::thread::sleep(std::time::Duration::from_millis(120));
             desktop::simulate_paste()
@@ -401,7 +409,7 @@ pub(crate) async fn plugin_clipboard_write_history(
 #[tauri::command]
 pub(crate) fn plugin_show_notification(
     body: String,
-    window: WebviewWindow,
+    window: Webview,
     app: AppHandle,
     runtime: State<'_, PluginRuntime>,
 ) -> Result<(), String> {
@@ -437,29 +445,153 @@ pub(crate) fn plugin_show_notification(
 /// 校验插件窗口身份，关闭插件并恢复主搜索窗口。
 #[tauri::command]
 pub(crate) fn plugin_out(
-    window: WebviewWindow,
+    window: Webview,
     runtime: State<'_, PluginRuntime>,
+    app: AppHandle,
 ) -> Result<(), String> {
     runtime.plugin_for_window(window.label())?;
-    window.close().map_err(|error| error.to_string())
+    let embedded = window.window().label() == "main";
+    let plugin_name = window.label().trim_start_matches("plugin-").to_owned();
+    window.close().map_err(|error| error.to_string())?;
+    if embedded {
+        runtime.unregister_instance(&format!("plugin-{plugin_name}"));
+        plugin::reset_embedded_layout(&app)?;
+        app.emit_to("main", "plugin-panel-closed", plugin_name)
+            .map_err(|error| error.to_string())?;
+    }
+    Ok(())
+}
+
+/**
+ * 由主启动器关闭一个内嵌插件，并撤销它的 API 身份。
+ * @param plugin_name 插件 manifest 名称。
+ * @param window 发起请求的主 Webview。
+ * @param app 桌面宿主句柄。
+ * @returns 子 Webview 关闭后的结果。
+ */
+#[tauri::command]
+pub(crate) fn close_embedded_plugin(
+    plugin_name: String,
+    window: Webview,
+    app: AppHandle,
+) -> Result<(), String> {
+    if window.label() != "main" {
+        return Err("只有主启动器可以关闭内嵌插件".to_owned());
+    }
+    plugin::close_plugin_window(&app, &plugin_name)
+}
+
+/**
+ * 在系统文件管理器中定位已安装插件目录。
+ * @param plugin_name 插件 manifest 名称。
+ * @param window 发起请求的主 Webview。
+ * @param runtime 插件运行时根目录。
+ * @returns 文件管理器打开后的结果。
+ */
+#[tauri::command]
+pub(crate) fn reveal_plugin_directory(
+    plugin_name: String,
+    window: Webview,
+    runtime: State<'_, PluginRuntime>,
+) -> Result<(), String> {
+    if window.label() != "main" {
+        return Err("只有主启动器可以打开插件目录".to_owned());
+    }
+    plugin::validate_plugin_name(&plugin_name)?;
+    let directory = runtime.root().join(plugin_name);
+    if !directory.is_dir() {
+        return Err("插件目录不存在".to_owned());
+    }
+    desktop::open_path(directory.to_string_lossy().into_owned())
+}
+
+/**
+ * 读取已安装插件的说明和私有数据目录，只返回数据键及大小。
+ * @param plugin_name 插件 manifest 名称。
+ * @param window 发起请求的主 Webview。
+ * @param runtime 插件安装根目录。
+ * @param state SQLite 数据状态。
+ * @returns README 文本与数据元信息。
+ */
+#[tauri::command]
+pub(crate) fn get_installed_plugin_detail(
+    plugin_name: String,
+    window: Webview,
+    runtime: State<'_, PluginRuntime>,
+    state: State<'_, AppState>,
+) -> Result<InstalledPluginDetail, String> {
+    if window.label() != "main" {
+        return Err("只有主启动器可以查看插件详情".to_owned());
+    }
+    plugin::validate_plugin_name(&plugin_name)?;
+    let directory = runtime
+        .root()
+        .join(&plugin_name)
+        .canonicalize()
+        .map_err(|_| "插件目录不存在".to_owned())?;
+    // README 只允许读取安装目录内不超过 1 MB 的普通文件。
+    let readme = ["README.md", "readme.md", "README.markdown"]
+        .into_iter()
+        .find_map(|name| {
+            let path = directory.join(name).canonicalize().ok()?;
+            let metadata = fs::metadata(&path).ok()?;
+            if !path.starts_with(&directory) || !metadata.is_file() || metadata.len() > 1024 * 1024
+            {
+                return None;
+            }
+            fs::read_to_string(path).ok()
+        })
+        .unwrap_or_default();
+    let data = state
+        .store
+        .lock()
+        .map_err(|_| "数据库锁已损坏".to_owned())?
+        .plugin_data_items(&plugin_name)?;
+    Ok(InstalledPluginDetail { readme, data })
+}
+
+/**
+ * 返回当前已经创建的插件 Webview 所属插件名称。
+ * @param window 发起请求的主 Webview。
+ * @param app 桌面宿主句柄。
+ * @param runtime 插件身份映射。
+ * @returns 去重后的运行中插件名称。
+ */
+#[tauri::command]
+pub(crate) fn list_running_plugins(
+    window: Webview,
+    app: AppHandle,
+    runtime: State<'_, PluginRuntime>,
+) -> Result<Vec<String>, String> {
+    if window.label() != "main" {
+        return Err("只有主启动器可以查看运行状态".to_owned());
+    }
+    let mut names = app
+        .webviews()
+        .into_keys()
+        .filter_map(|label| runtime.plugin_for_window(&label).ok())
+        .collect::<Vec<_>>();
+    names.sort();
+    names.dedup();
+    Ok(names)
 }
 
 /// 隐藏插件宿主窗口，并记录随后退出时是否恢复此前的主启动器。
 #[tauri::command]
 pub(crate) fn plugin_hide_main_window(
     is_restore_pre_window: Option<bool>,
-    window: WebviewWindow,
+    window: Webview,
     runtime: State<'_, PluginRuntime>,
 ) -> Result<(), String> {
     runtime.set_restore_main_on_close(window.label(), is_restore_pre_window.unwrap_or(true))?;
-    window.hide().map_err(|error| error.to_string())
+    window.window().hide().map_err(|error| error.to_string())
 }
 
 /// 校验插件窗口身份并持久化一条插件私有 JSON 文档。
 #[tauri::command]
 pub(crate) fn plugin_db_put(
     document: serde_json::Value,
-    window: WebviewWindow,
+    window: Webview,
     runtime: State<'_, PluginRuntime>,
     state: State<'_, AppState>,
 ) -> Result<serde_json::Value, String> {
@@ -481,7 +613,7 @@ pub(crate) fn plugin_db_put(
 #[tauri::command]
 pub(crate) fn plugin_db_remove(
     document_id: String,
-    window: WebviewWindow,
+    window: Webview,
     runtime: State<'_, PluginRuntime>,
     state: State<'_, AppState>,
 ) -> Result<serde_json::Value, String> {
@@ -500,7 +632,7 @@ pub(crate) fn plugin_db_remove(
 pub(crate) fn plugin_storage_set(
     key: String,
     value: serde_json::Value,
-    window: WebviewWindow,
+    window: Webview,
     runtime: State<'_, PluginRuntime>,
     state: State<'_, AppState>,
 ) -> Result<(), String> {
@@ -521,7 +653,7 @@ pub(crate) fn plugin_storage_set(
 #[tauri::command]
 pub(crate) fn plugin_storage_remove(
     key: String,
-    window: WebviewWindow,
+    window: Webview,
     runtime: State<'_, PluginRuntime>,
     state: State<'_, AppState>,
 ) -> Result<(), String> {
@@ -538,7 +670,7 @@ pub(crate) fn plugin_storage_remove(
 #[tauri::command]
 pub(crate) fn plugin_feature_set(
     feature: serde_json::Value,
-    window: WebviewWindow,
+    window: Webview,
     app: AppHandle,
     runtime: State<'_, PluginRuntime>,
     state: State<'_, AppState>,
@@ -559,7 +691,7 @@ pub(crate) fn plugin_feature_set(
 #[tauri::command]
 pub(crate) fn plugin_feature_remove(
     code: String,
-    window: WebviewWindow,
+    window: Webview,
     app: AppHandle,
     runtime: State<'_, PluginRuntime>,
     state: State<'_, AppState>,
@@ -582,7 +714,7 @@ pub(crate) fn plugin_attachment_put(
     attachment_id: String,
     content_type: String,
     data: Vec<u8>,
-    window: WebviewWindow,
+    window: Webview,
     runtime: State<'_, PluginRuntime>,
     state: State<'_, AppState>,
 ) -> Result<serde_json::Value, String> {
@@ -601,7 +733,7 @@ pub(crate) fn plugin_attachment_put(
 #[tauri::command]
 pub(crate) fn plugin_attachment_get(
     attachment_id: String,
-    window: WebviewWindow,
+    window: Webview,
     runtime: State<'_, PluginRuntime>,
     state: State<'_, AppState>,
 ) -> Result<Option<serde_json::Value>, String> {
@@ -623,7 +755,7 @@ pub(crate) fn plugin_attachment_get(
 #[tauri::command]
 pub(crate) fn plugin_attachment_remove(
     attachment_id: String,
-    window: WebviewWindow,
+    window: Webview,
     runtime: State<'_, PluginRuntime>,
     state: State<'_, AppState>,
 ) -> Result<serde_json::Value, String> {
@@ -641,7 +773,7 @@ pub(crate) fn plugin_attachment_remove(
 #[tauri::command]
 pub(crate) fn plugin_file_stats(
     path: String,
-    window: WebviewWindow,
+    window: Webview,
     runtime: State<'_, PluginRuntime>,
 ) -> Result<PluginFileStats, String> {
     let path = runtime.authorized_existing_path(window.label(), &PathBuf::from(path))?;
@@ -652,7 +784,7 @@ pub(crate) fn plugin_file_stats(
 #[tauri::command]
 pub(crate) fn plugin_read_directory(
     path: String,
-    window: WebviewWindow,
+    window: Webview,
     runtime: State<'_, PluginRuntime>,
 ) -> Result<Vec<PluginFileStats>, String> {
     let path = runtime.authorized_existing_path(window.label(), &PathBuf::from(path))?;
@@ -677,7 +809,7 @@ pub(crate) fn plugin_read_directory(
 #[tauri::command]
 pub(crate) fn plugin_path_exists(
     path: String,
-    window: WebviewWindow,
+    window: Webview,
     runtime: State<'_, PluginRuntime>,
 ) -> Result<bool, String> {
     let path = PathBuf::from(path);
@@ -695,7 +827,7 @@ pub(crate) fn plugin_path_exists(
 pub(crate) fn plugin_rename_path(
     old_path: String,
     new_path: String,
-    window: WebviewWindow,
+    window: Webview,
     runtime: State<'_, PluginRuntime>,
 ) -> Result<(), String> {
     let source = runtime.authorized_existing_path(window.label(), &PathBuf::from(old_path))?;
@@ -713,7 +845,7 @@ pub(crate) fn plugin_rename_path(
 #[tauri::command]
 pub(crate) fn plugin_read_file(
     path: String,
-    window: WebviewWindow,
+    window: Webview,
     runtime: State<'_, PluginRuntime>,
 ) -> Result<Vec<u8>, String> {
     let path = runtime.authorized_existing_path(window.label(), &PathBuf::from(path))?;
@@ -732,7 +864,7 @@ pub(crate) fn plugin_read_file(
 pub(crate) fn plugin_write_file(
     path: String,
     data: Vec<u8>,
-    window: WebviewWindow,
+    window: Webview,
     runtime: State<'_, PluginRuntime>,
 ) -> Result<(), String> {
     if data.len() > 16 * 1024 * 1024 {
@@ -755,7 +887,7 @@ pub(crate) fn plugin_write_file(
 pub(crate) fn plugin_copy_path(
     source_path: String,
     target_path: String,
-    window: WebviewWindow,
+    window: Webview,
     runtime: State<'_, PluginRuntime>,
 ) -> Result<(), String> {
     let source = runtime.authorized_existing_path(window.label(), &PathBuf::from(source_path))?;
@@ -775,7 +907,7 @@ pub(crate) fn plugin_copy_path(
 #[tauri::command]
 pub(crate) fn plugin_create_directory(
     path: String,
-    window: WebviewWindow,
+    window: Webview,
     runtime: State<'_, PluginRuntime>,
 ) -> Result<(), String> {
     let candidate = PathBuf::from(path);
@@ -795,7 +927,7 @@ pub(crate) fn plugin_create_directory(
 #[tauri::command]
 pub(crate) fn plugin_shell_open(
     target: String,
-    window: WebviewWindow,
+    window: Webview,
     runtime: State<'_, PluginRuntime>,
 ) -> Result<(), String> {
     if target.starts_with("https://") || target.starts_with("http://") {
@@ -809,7 +941,7 @@ pub(crate) fn plugin_shell_open(
 #[tauri::command]
 pub(crate) fn plugin_shell_reveal(
     path: String,
-    window: WebviewWindow,
+    window: Webview,
     runtime: State<'_, PluginRuntime>,
 ) -> Result<(), String> {
     let path = runtime.authorized_existing_path(window.label(), &PathBuf::from(path))?;
@@ -822,7 +954,7 @@ pub(crate) async fn plugin_http_request(
     url: String,
     headers: std::collections::HashMap<String, String>,
     max_bytes: usize,
-    window: WebviewWindow,
+    window: Webview,
     runtime: State<'_, PluginRuntime>,
 ) -> Result<PluginHttpResponse, String> {
     let plugin_name = runtime.plugin_for_window(window.label())?;
@@ -886,7 +1018,7 @@ pub(crate) async fn plugin_http_request(
 #[tauri::command]
 pub(crate) async fn plugin_dialog_open(
     options: PluginDialogOptions,
-    window: WebviewWindow,
+    window: Webview,
     runtime: State<'_, PluginRuntime>,
 ) -> Result<Vec<String>, String> {
     runtime.plugin_for_window(window.label())?;
@@ -905,7 +1037,7 @@ pub(crate) async fn plugin_dialog_open(
 #[tauri::command]
 pub(crate) async fn plugin_dialog_save(
     options: PluginDialogOptions,
-    window: WebviewWindow,
+    window: Webview,
     runtime: State<'_, PluginRuntime>,
 ) -> Result<Option<String>, String> {
     runtime.plugin_for_window(window.label())?;
@@ -929,7 +1061,7 @@ pub(crate) async fn plugin_dialog_save(
 pub(crate) fn plugin_window_set_size(
     width: f64,
     height: f64,
-    window: WebviewWindow,
+    window: Webview,
     runtime: State<'_, PluginRuntime>,
 ) -> Result<(), String> {
     runtime.plugin_for_window(window.label())?;
@@ -946,7 +1078,7 @@ pub(crate) fn plugin_window_set_size(
 pub(crate) fn plugin_window_set_position(
     x: f64,
     y: f64,
-    window: WebviewWindow,
+    window: Webview,
     runtime: State<'_, PluginRuntime>,
 ) -> Result<(), String> {
     runtime.plugin_for_window(window.label())?;
@@ -961,22 +1093,23 @@ pub(crate) fn plugin_window_set_position(
 /// 把当前插件窗口移动到所在桌面的中心。
 #[tauri::command]
 pub(crate) fn plugin_window_center(
-    window: WebviewWindow,
+    window: Webview,
     runtime: State<'_, PluginRuntime>,
 ) -> Result<(), String> {
     runtime.plugin_for_window(window.label())?;
-    window.center().map_err(|error| error.to_string())
+    window.window().center().map_err(|error| error.to_string())
 }
 
 /// 设置当前插件窗口置顶状态。
 #[tauri::command]
 pub(crate) fn plugin_window_set_always_on_top(
     enabled: bool,
-    window: WebviewWindow,
+    window: Webview,
     runtime: State<'_, PluginRuntime>,
 ) -> Result<(), String> {
     runtime.plugin_for_window(window.label())?;
     window
+        .window()
         .set_always_on_top(enabled)
         .map_err(|error| error.to_string())
 }
@@ -985,14 +1118,20 @@ pub(crate) fn plugin_window_set_always_on_top(
 #[tauri::command]
 pub(crate) fn plugin_window_set_minimized(
     minimized: bool,
-    window: WebviewWindow,
+    window: Webview,
     runtime: State<'_, PluginRuntime>,
 ) -> Result<(), String> {
     runtime.plugin_for_window(window.label())?;
     if minimized {
-        window.minimize().map_err(|error| error.to_string())
+        window
+            .window()
+            .minimize()
+            .map_err(|error| error.to_string())
     } else {
-        window.unminimize().map_err(|error| error.to_string())
+        window
+            .window()
+            .unminimize()
+            .map_err(|error| error.to_string())
     }
 }
 
@@ -1000,14 +1139,20 @@ pub(crate) fn plugin_window_set_minimized(
 #[tauri::command]
 pub(crate) fn plugin_window_set_maximized(
     maximized: bool,
-    window: WebviewWindow,
+    window: Webview,
     runtime: State<'_, PluginRuntime>,
 ) -> Result<(), String> {
     runtime.plugin_for_window(window.label())?;
     if maximized {
-        window.maximize().map_err(|error| error.to_string())
+        window
+            .window()
+            .maximize()
+            .map_err(|error| error.to_string())
     } else {
-        window.unmaximize().map_err(|error| error.to_string())
+        window
+            .window()
+            .unmaximize()
+            .map_err(|error| error.to_string())
     }
 }
 
@@ -1015,11 +1160,12 @@ pub(crate) fn plugin_window_set_maximized(
 #[tauri::command]
 pub(crate) fn plugin_window_set_fullscreen(
     fullscreen: bool,
-    window: WebviewWindow,
+    window: Webview,
     runtime: State<'_, PluginRuntime>,
 ) -> Result<(), String> {
     runtime.plugin_for_window(window.label())?;
     window
+        .window()
         .set_fullscreen(fullscreen)
         .map_err(|error| error.to_string())
 }
@@ -1027,7 +1173,7 @@ pub(crate) fn plugin_window_set_fullscreen(
 /// 校验插件身份后截取当前鼠标所在显示器，并返回 PNG 字节。
 #[tauri::command]
 pub(crate) async fn plugin_screen_capture(
-    window: WebviewWindow,
+    window: Webview,
     app: AppHandle,
     runtime: State<'_, PluginRuntime>,
 ) -> Result<Vec<u8>, String> {
@@ -1055,7 +1201,7 @@ pub(crate) async fn plugin_screen_capture(
 pub(crate) async fn plugin_input_type_text(
     content: String,
     target_external: bool,
-    window: WebviewWindow,
+    window: Webview,
     runtime: State<'_, PluginRuntime>,
 ) -> Result<(), String> {
     runtime.plugin_for_window(window.label())?;
@@ -1063,7 +1209,7 @@ pub(crate) async fn plugin_input_type_text(
         return Err("单次模拟输入不能超过 100000 个字符".to_owned());
     }
     if target_external {
-        window.hide().map_err(|error| error.to_string())?;
+        window.window().hide().map_err(|error| error.to_string())?;
     }
     tauri::async_runtime::spawn_blocking(move || {
         if target_external {
@@ -1080,12 +1226,12 @@ pub(crate) async fn plugin_input_type_text(
 pub(crate) async fn plugin_input_tap_key(
     key: String,
     target_external: bool,
-    window: WebviewWindow,
+    window: Webview,
     runtime: State<'_, PluginRuntime>,
 ) -> Result<(), String> {
     runtime.plugin_for_window(window.label())?;
     if target_external {
-        window.hide().map_err(|error| error.to_string())?;
+        window.window().hide().map_err(|error| error.to_string())?;
     }
     tauri::async_runtime::spawn_blocking(move || {
         if target_external {

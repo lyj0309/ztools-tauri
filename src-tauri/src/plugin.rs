@@ -15,7 +15,8 @@ use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tauri::{
-    http, AppHandle, Emitter, Manager, Monitor, WebviewUrl, WebviewWindowBuilder, WindowEvent,
+    http, AppHandle, Emitter, LogicalPosition, LogicalSize, Manager, Monitor, WebviewUrl,
+    WebviewWindowBuilder, WindowEvent,
 };
 use walkdir::WalkDir;
 
@@ -957,8 +958,8 @@ fn watch_development_directory(
         match runtime.install_from_directory(&source) {
             Ok(_) => {
                 fingerprint = Some(stable);
-                if let Some(window) = app.get_webview_window(&plugin_window_label(&plugin_name)) {
-                    let _ = window.eval("globalThis.location.reload()");
+                if let Some(webview) = app.get_webview(&plugin_window_label(&plugin_name)) {
+                    let _ = webview.eval("globalThis.location.reload()");
                 }
                 let _ = app.emit(
                     "plugin-development-status",
@@ -1127,6 +1128,22 @@ pub(crate) fn launch_plugin(
     let action_json = serde_json::to_string(&action).map_err(|error| error.to_string())?;
     let restore_main_on_close = !(plugin_name == "break-reminder" && action.code == "break");
 
+    // 普通插件优先复用主窗口搜索框下方的子 Webview，避免重复创建弹窗。
+    if let Some(webview) = app.get_webview(&label) {
+        if webview.window().label() == "main" {
+            runtime.set_restore_main_on_close(&label, true)?;
+            let payload_paths = plugin_payload_paths(&action.payload);
+            if !payload_paths.is_empty() {
+                runtime.grant_paths(&label, payload_paths)?;
+            }
+            webview
+                .eval(format!("window.__ztoolsDispatchEnter?.({action_json})"))
+                .map_err(|error| error.to_string())?;
+            show_embedded_plugin(app, &webview, &manifest.title)?;
+            return Ok(());
+        }
+    }
+
     if let Some(window) = app.get_webview_window(&label) {
         // 复用单例窗口时先派发新的进入动作，再恢复窗口焦点。
         runtime.set_restore_main_on_close(&label, restore_main_on_close)?;
@@ -1208,6 +1225,35 @@ pub(crate) fn launch_plugin(
             return Err(error);
         }
     }
+    let embed_in_main = plugin_name != "break-reminder"
+        && !(std::env::var("ZTOOLS_E2E").as_deref() == Ok("1")
+            && std::env::var_os("ZTOOLS_E2E_PLUGIN_NAME").is_some());
+    if embed_in_main {
+        // 子 Webview 与主窗口共享外壳，但继续使用独立标签校验插件 API 和私有协议。
+        let main = app
+            .get_window("main")
+            .ok_or_else(|| "主启动器窗口不存在".to_owned())?;
+        let builder = tauri::webview::WebviewBuilder::new(&label, WebviewUrl::External(url))
+            .data_directory(data_directory)
+            .initialization_script(init_script);
+        let webview = match main.add_child(
+            builder,
+            LogicalPosition::new(0.0, 61.0),
+            LogicalSize::new(800.0, 539.0),
+        ) {
+            Ok(webview) => webview,
+            Err(error) => {
+                runtime.unregister_instance(&label);
+                return Err(format!("无法在主窗口加载插件：{error}"));
+            }
+        };
+        if let Err(error) = show_embedded_plugin(app, &webview, &manifest.title) {
+            let _ = webview.close();
+            runtime.unregister_instance(&label);
+            return Err(error);
+        }
+        return Ok(());
+    }
     // WebView2 可能需要几秒初始化，创建完成前保留主窗口供用户查看和操作。
     let build_result = WebviewWindowBuilder::new(app, &label, WebviewUrl::External(url))
         .title(&manifest.title)
@@ -1254,6 +1300,155 @@ pub(crate) fn launch_plugin(
 }
 
 /**
+ * 把插件 Webview 显示在主搜索框下方，并收起先前的内嵌插件。
+ * @param app 桌面应用句柄。
+ * @param webview 要显示的插件子 Webview。
+ * @param title 插件标题。
+ * @returns 主窗口与插件内容显示完成，失败时返回原因。
+ */
+fn show_embedded_plugin(
+    app: &AppHandle,
+    webview: &tauri::Webview,
+    title: &str,
+) -> Result<(), String> {
+    // 单次只保留一个插件 Webview；释放旧实例后，布局可在关闭时还原成普通搜索框。
+    for (label, other) in app.webviews() {
+        if label != webview.label()
+            && label.starts_with("plugin-")
+            && other.window().label() == "main"
+        {
+            other.close().map_err(|error| error.to_string())?;
+            app.state::<PluginRuntime>().unregister_instance(&label);
+        }
+    }
+    let main = app
+        .get_window("main")
+        .ok_or_else(|| "主启动器窗口不存在".to_owned())?;
+    main.set_size(LogicalSize::new(800.0, 600.0))
+        .map_err(|error| error.to_string())?;
+    // GTK/WebView2 首次创建时主窗口仍可能是搜索结果高度，扩展后重设子视图边界。
+    webview
+        .set_position(LogicalPosition::new(0.0, 61.0))
+        .map_err(|error| error.to_string())?;
+    webview
+        .set_size(LogicalSize::new(800.0, 539.0))
+        .map_err(|error| error.to_string())?;
+    #[cfg(target_os = "linux")]
+    arrange_linux_embedded_views(&main)?;
+    main.show().map_err(|error| error.to_string())?;
+    app.emit_to(
+        "main",
+        "plugin-panel-open",
+        serde_json::json!({
+            "name": webview.label().trim_start_matches("plugin-"),
+            "title": title,
+        }),
+    )
+    .map_err(|error| error.to_string())?;
+    webview.show().map_err(|error| error.to_string())?;
+    webview.set_focus().map_err(|error| error.to_string())
+}
+
+/**
+ * 把 Linux 默认纵向 GtkBox 中的 Webview 放进固定布局，使插件真正覆盖搜索栏下方。
+ * @param main 主窗口句柄。
+ * @returns GTK 主线程布局任务投递结果。
+ */
+#[cfg(target_os = "linux")]
+fn arrange_linux_embedded_views(main: &tauri::Window) -> Result<(), String> {
+    use gtk::prelude::*;
+
+    let window = main.clone();
+    main.run_on_main_thread(move || {
+        let Ok(box_layout) = window.default_vbox() else {
+            return;
+        };
+        // Wry 默认将子 Webview 追加到纵向 Box；转成 Fixed 才能按像素叠放。
+        let existing_fixed = box_layout
+            .children()
+            .into_iter()
+            .find_map(|widget| widget.downcast::<gtk::Fixed>().ok());
+        let had_fixed = existing_fixed.is_some();
+        let fixed = existing_fixed.unwrap_or_else(|| {
+            let fixed = gtk::Fixed::new();
+            fixed.set_size_request(800, 600);
+            box_layout.pack_start(&fixed, true, true, 0);
+            fixed.show();
+            fixed
+        });
+        fixed.set_size_request(800, 600);
+        if had_fixed {
+            if let Some(primary) = fixed.children().first() {
+                primary.set_size_request(800, 600);
+            }
+        }
+        let children = box_layout
+            .children()
+            .into_iter()
+            .filter(|widget| widget != &fixed.clone().upcast::<gtk::Widget>())
+            .collect::<Vec<_>>();
+        for (index, widget) in children.into_iter().enumerate() {
+            let is_main = !had_fixed && index == 0;
+            box_layout.remove(&widget);
+            widget.set_size_request(800, if is_main { 600 } else { 539 });
+            fixed.put(&widget, 0, if is_main { 0 } else { 61 });
+            if is_main {
+                widget.show();
+            }
+        }
+    })
+    .map_err(|error| error.to_string())
+}
+
+/**
+ * 关闭内嵌插件后把主 Webview 放回默认 GtkBox，恢复搜索结果的动态高度。
+ * @param app 桌面应用句柄。
+ * @returns 布局复位任务投递结果。
+ */
+pub(crate) fn reset_embedded_layout(app: &AppHandle) -> Result<(), String> {
+    #[cfg(target_os = "linux")]
+    {
+        use gtk::prelude::*;
+
+        if let Some(main) = app.get_window("main") {
+            let window = main.clone();
+            main.run_on_main_thread(move || {
+                let Ok(box_layout) = window.default_vbox() else {
+                    return;
+                };
+                if let Some(fixed) = box_layout
+                    .children()
+                    .into_iter()
+                    .find_map(|widget| widget.downcast::<gtk::Fixed>().ok())
+                {
+                    if let Some(primary) = fixed.children().first().cloned() {
+                        fixed.remove(&primary);
+                        box_layout.remove(&fixed);
+                        primary.set_size_request(-1, 1);
+                        box_layout.pack_start(&primary, true, true, 0);
+                        primary.show();
+                        if let Ok(gtk_window) = window.gtk_window() {
+                            box_layout.queue_resize();
+                            gtk::glib::timeout_add_local_once(
+                                std::time::Duration::from_millis(50),
+                                move || {
+                                    // GDK 层可越过 WebKit 仍缓存的 600 像素自然高度。
+                                    if let Some(gdk_window) = gtk_window.window() {
+                                        gdk_window.resize(800, 61);
+                                    }
+                                },
+                            );
+                        }
+                    }
+                }
+            })
+            .map_err(|error| error.to_string())?;
+        }
+    }
+    Ok(())
+}
+
+/**
  * 把百度翻译默认插件的功能限制到两个固定的官方页面。
  * @param code 插件功能代码。
  * @returns 对应页面的固定地址；其他功能返回错误。
@@ -1268,12 +1463,12 @@ fn baidu_site_url(code: &str) -> Result<tauri::Url, String> {
 }
 
 /**
- * 在独立 WebView 中打开百度官网，让其自行调用匿名翻译接口和处理验证。
+ * 在主窗口的独立子 Webview 中打开百度官网，让站点自行处理匿名翻译。
  * @param app 桌面应用句柄。
  * @param runtime 插件运行时与隔离数据目录。
  * @param manifest 内置百度翻译插件声明。
  * @param action 用户选择的文字或图片入口。
- * @returns 官网窗口显示完成，失败时返回原因。
+ * @returns 官网内容显示完成，失败时返回原因。
  */
 fn launch_baidu_site(
     app: &AppHandle,
@@ -1291,64 +1486,44 @@ fn launch_baidu_site(
     }
     let url = baidu_site_url(&action.code)?;
     let label = plugin_window_label(&manifest.name);
-    if let Some(window) = app.get_webview_window(&label) {
-        // 已打开的官网窗口切换到目标功能，保留它自身的站点会话。
-        window.navigate(url).map_err(|error| error.to_string())?;
-        hide_main_window(app)?;
-        window.show().map_err(|error| error.to_string())?;
-        window.set_focus().map_err(|error| error.to_string())?;
-        return Ok(());
+    if let Some(webview) = app.get_webview(&label) {
+        if webview.window().label() == "main" {
+            // 在已有子 Webview 中切换文字或图片翻译，保留站点会话。
+            webview.navigate(url).map_err(|error| error.to_string())?;
+            return show_embedded_plugin(app, &webview, &manifest.title);
+        }
     }
-
     let data_directory = runtime.root().join(".webview-data").join(&manifest.name);
     fs::create_dir_all(&data_directory).map_err(|error| error.to_string())?;
     // 完成资源准备后再登记窗口身份；创建失败时撤销登记。
     runtime.register_instance(&label, &manifest.name)?;
-    let build_result = WebviewWindowBuilder::new(app, &label, WebviewUrl::External(url))
-        .title(&manifest.title)
-        .inner_size(1100.0, 760.0)
-        .min_inner_size(760.0, 520.0)
-        .center()
-        .data_directory(data_directory)
-        .build();
-    let window = match build_result {
-        Ok(window) => window,
+    let main = app
+        .get_window("main")
+        .ok_or_else(|| "主启动器窗口不存在".to_owned())?;
+    let builder = tauri::webview::WebviewBuilder::new(&label, WebviewUrl::External(url))
+        .data_directory(data_directory.clone());
+    let webview = match main.add_child(
+        builder,
+        LogicalPosition::new(0.0, 61.0),
+        LogicalSize::new(800.0, 539.0),
+    ) {
+        Ok(webview) => webview,
         Err(error) => {
             runtime.unregister_instance(&label);
-            let _ = restore_main_window(app);
-            return Err(format!("无法创建百度翻译窗口：{error}"));
+            return Err(format!("无法在主窗口加载百度翻译：{error}"));
         }
     };
-    window.on_window_event({
-        let app = app.clone();
-        let label = label.clone();
-        move |event| {
-            if matches!(event, WindowEvent::Destroyed) {
-                let runtime = app.state::<PluginRuntime>();
-                let restore_main = runtime.restore_main_after_close(&label);
-                runtime.unregister_instance(&label);
-                if restore_main {
-                    let _ = restore_main_window(&app);
-                }
-            }
-        }
-    });
-    if let Err(error) = hide_main_window(app)
-        .and_then(|_| window.show().map_err(|error| error.to_string()))
-        .and_then(|_| window.set_focus().map_err(|error| error.to_string()))
-    {
-        // 显示失败时关闭孤儿窗口，并恢复主启动器。
-        let _ = window.close();
+    if let Err(error) = show_embedded_plugin(app, &webview, &manifest.title) {
+        let _ = webview.close();
         runtime.unregister_instance(&label);
-        let _ = restore_main_window(app);
-        return Err(format!("无法显示百度翻译窗口：{error}"));
+        return Err(error);
     }
     Ok(())
 }
 
 /// 临时取消主启动器置顶并隐藏它，确保插件置顶窗口能获得真实前台层级。
 fn hide_main_window(app: &AppHandle) -> Result<(), String> {
-    if let Some(main) = app.get_webview_window("main") {
+    if let Some(main) = app.get_window("main") {
         main.set_always_on_top(false)
             .map_err(|error| error.to_string())?;
         main.hide().map_err(|error| error.to_string())?;
@@ -1358,7 +1533,7 @@ fn hide_main_window(app: &AppHandle) -> Result<(), String> {
 
 /// 恢复主启动器的置顶属性、可见性和焦点，供插件退出及创建失败回滚使用。
 pub(crate) fn restore_main_window(app: &AppHandle) -> Result<(), String> {
-    if let Some(main) = app.get_webview_window("main") {
+    if let Some(main) = app.get_window("main") {
         main.set_always_on_top(true)
             .map_err(|error| error.to_string())?;
         main.show().map_err(|error| error.to_string())?;
@@ -1370,7 +1545,18 @@ pub(crate) fn restore_main_window(app: &AppHandle) -> Result<(), String> {
 /// 关闭插件的活动窗口，使升级或卸载不会保留被占用的资源。
 pub(crate) fn close_plugin_window(app: &AppHandle, plugin_name: &str) -> Result<(), String> {
     validate_plugin_name(plugin_name)?;
-    if let Some(window) = app.get_webview_window(&plugin_window_label(plugin_name)) {
+    let label = plugin_window_label(plugin_name);
+    if let Some(webview) = app.get_webview(&label) {
+        if webview.window().label() == "main" {
+            webview.close().map_err(|error| error.to_string())?;
+            app.state::<PluginRuntime>().unregister_instance(&label);
+            reset_embedded_layout(app)?;
+            app.emit_to("main", "plugin-panel-closed", plugin_name)
+                .map_err(|error| error.to_string())?;
+            return Ok(());
+        }
+    }
+    if let Some(window) = app.get_webview_window(&label) {
         window.close().map_err(|error| error.to_string())?;
     }
     Ok(())
@@ -1422,15 +1608,19 @@ fn resolve_plugin_asset(
     let is_screenshot_pin = plugin_name == "screenshot"
         && (webview_label.starts_with("plugin-screenshot-pin-")
             || webview_label == "plugin-screenshot-history");
-    if webview_label != base_label && !is_screenshot_pin {
-        return Err("插件窗口与资源身份不匹配".to_owned());
-    }
     let relative = components.collect::<PathBuf>();
     validate_relative_path(&relative)?;
     let plugin_root = root
         .join(plugin_name)
         .canonicalize()
         .map_err(|_| "插件目录不存在".to_owned())?;
+    if webview_label != base_label && !is_screenshot_pin {
+        // 主启动器只可读取 manifest 明确声明的图标，插件 HTML/JS 继续隔离。
+        let logo = read_manifest(&plugin_root)?.logo;
+        if webview_label != "main" || logo.is_empty() || relative != logo {
+            return Err("插件窗口与资源身份不匹配".to_owned());
+        }
+    }
     let target = plugin_root
         .join(relative)
         .canonicalize()
@@ -2401,6 +2591,16 @@ mod tests {
         );
         assert!(resolve_plugin_asset(&root, "plugin-other", "/fixture/index.html").is_err());
         assert!(resolve_plugin_asset(&root, "plugin-fixture", "/fixture/../plugin.json").is_err());
+        // 主搜索页只获得 manifest 声明的图标，不能借资源协议读取插件代码。
+        fs::write(plugin.join("logo.png"), b"fixture logo").expect("logo should exist");
+        fs::write(
+            plugin.join("plugin.json"),
+            r#"{"name":"fixture","title":"Fixture","version":"1.0.0","main":"index.html","logo":"logo.png"}"#,
+        )
+        .expect("manifest with logo should exist");
+        assert!(resolve_plugin_asset(&root, "main", "/fixture/logo.png").is_ok());
+        assert!(resolve_plugin_asset(&root, "main", "/fixture/index.html").is_err());
+        assert!(resolve_plugin_asset(&root, "main", "/fixture/assets/main.js").is_err());
 
         // 只有宿主创建的截图贴图子窗口可以读取同一个内置插件目录。
         let screenshot = root.join("screenshot");

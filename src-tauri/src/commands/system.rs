@@ -2,7 +2,7 @@ use std::{collections::HashMap, fs};
 
 use semver::Version;
 use serde::{Deserialize, Serialize};
-use tauri::{plugin::PermissionState, AppHandle, Emitter, Manager, State, WebviewWindow};
+use tauri::{plugin::PermissionState, AppHandle, Emitter, Manager, State, Webview};
 use tauri_plugin_autostart::ManagerExt as AutostartManagerExt;
 use tauri_plugin_global_shortcut::GlobalShortcutExt;
 use tauri_plugin_notification::NotificationExt;
@@ -197,11 +197,8 @@ pub(crate) fn send_test_notification(app: AppHandle) -> Result<(), String> {
 
 /// 隐藏启动器后截取鼠标所在屏幕，并恢复窗口与焦点。
 #[tauri::command]
-pub(crate) async fn capture_screen(
-    app: AppHandle,
-    window: WebviewWindow,
-) -> Result<String, String> {
-    window.hide().map_err(|error| error.to_string())?;
+pub(crate) async fn capture_screen(app: AppHandle, window: Webview) -> Result<String, String> {
+    window.window().hide().map_err(|error| error.to_string())?;
     let capture_handle = app.clone();
     let result = tauri::async_runtime::spawn_blocking(move || {
         // 让窗口管理器先完成隐藏，再调用可能阻塞的系统截图工具。
@@ -212,8 +209,8 @@ pub(crate) async fn capture_screen(
     .map_err(|error| format!("截图任务异常结束：{error}"))?;
 
     // 无论截图成功或失败都恢复设置窗口，避免用户失去错误反馈入口。
-    let _ = window.show();
-    let _ = window.set_focus();
+    let _ = window.window().show();
+    let _ = window.window().set_focus();
     result
 }
 

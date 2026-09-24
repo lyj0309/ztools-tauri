@@ -77,6 +77,7 @@ pub fn run() {
             commands::launcher::delete_local_shortcut,
             commands::launcher::update_launcher_settings,
             commands::launcher::hide_main_window,
+            commands::launcher::resize_main_window,
             commands::system::sync_now,
             commands::system::get_sync_status,
             commands::system::send_test_notification,
@@ -118,6 +119,10 @@ pub fn run() {
             commands::plugin::stop_plugin_development,
             commands::plugin::uninstall_plugin,
             commands::plugin::launch_plugin_feature,
+            commands::plugin::close_embedded_plugin,
+            commands::plugin::reveal_plugin_directory,
+            commands::plugin::get_installed_plugin_detail,
+            commands::plugin::list_running_plugins,
             commands::plugin::plugin_copy_text,
             commands::plugin::plugin_clipboard_get_history,
             commands::plugin::plugin_clipboard_search,
@@ -218,7 +223,7 @@ pub fn run() {
                 window.on_window_event(move |event| match event {
                     WindowEvent::CloseRequested { api, .. } => {
                         api.prevent_close();
-                        if let Some(window) = app_handle.get_webview_window("main") {
+                        if let Some(window) = app_handle.get_window("main") {
                             let _ = window.hide();
                         }
                     }
@@ -231,7 +236,7 @@ pub fn run() {
                             .and_then(|store| store.settings().ok())
                             .is_some_and(|settings| settings.hide_on_blur);
                         if should_hide {
-                            if let Some(window) = app_handle.get_webview_window("main") {
+                            if let Some(window) = app_handle.get_window("main") {
                                 let _ = window.hide();
                             }
                         }
@@ -299,7 +304,7 @@ fn launch_e2e_plugin(app: &tauri::AppHandle) -> Result<(), Box<dyn std::error::E
     if plugin_name == "screenshot" && (feature_code == "capture" || feature_code == "pin") {
         let screenshot_app = app.clone();
         let main = app
-            .get_webview_window("main")
+            .get_window("main")
             .ok_or_else(|| io::Error::other("main window is unavailable"))?;
         // 测试使用正式异步入口创建截图编辑器或历史图片选择页。
         tauri::async_runtime::spawn(async move {

@@ -11,7 +11,7 @@ use libloading::Library;
 use ppocr_rs::OcrLite;
 use serde_yaml::Value;
 use sha2::{Digest, Sha256};
-use tauri::{Manager, WebviewWindow};
+use tauri::{Manager, Webview};
 
 use crate::ocr::OcrResult;
 
@@ -125,7 +125,7 @@ fn bootstrap_path() -> Result<PathBuf, String> {
  * @returns 检测、识别和字典的本地路径。
  * @throws 下载、校验或缓存失败。
  */
-pub(crate) async fn ensure_models(window: &WebviewWindow) -> Result<ModelPaths, String> {
+pub(crate) async fn ensure_models(window: &Webview) -> Result<ModelPaths, String> {
     let root = if std::env::var("ZTOOLS_E2E").as_deref() == Ok("1") {
         std::env::var_os("ZTOOLS_DATA_ROOT")
             .map(PathBuf::from)

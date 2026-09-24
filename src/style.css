@@ -1473,3 +1473,313 @@ footer .shortcut-label {
   color: #d84a52 !important;
   background: rgba(216, 74, 82, 0.1);
 }
+
+/* 原版插件中心在主搜索框下方占满工作区，列表和详情共用这块区域。 */
+.settings-workspace {
+  grid-column: 1;
+  grid-row: 2 / -1;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.active-plugin-title {
+  max-width: 120px;
+  overflow: hidden;
+  color: var(--text-muted);
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.active-plugin-close {
+  width: 26px;
+  height: 26px;
+  color: var(--text-muted);
+  font-size: 20px;
+  cursor: pointer;
+  background: transparent;
+  border: 0;
+  border-radius: 5px;
+  -webkit-app-region: no-drag;
+}
+
+.active-plugin-close:hover {
+  color: var(--text-primary);
+  background: var(--hover-bg);
+}
+
+.installed-plugins-page {
+  position: relative;
+  padding: 20px;
+}
+
+.installed-toolbar,
+.installed-filters,
+.installed-plugin-card,
+.installed-plugin-actions,
+.installed-detail-topbar,
+.installed-detail-actions,
+.installed-detail-heading,
+.installed-import-heading,
+.installed-import-actions {
+  display: flex;
+  align-items: center;
+}
+
+.installed-toolbar {
+  justify-content: space-between;
+  margin-bottom: 20px;
+}
+
+.installed-filters {
+  gap: 6px;
+  padding: 3px;
+  background: color-mix(in srgb, var(--text-primary) 7%, transparent);
+  border-radius: 8px;
+}
+
+.installed-filters button {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 14px;
+  color: var(--text-muted);
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  background: transparent;
+  border: 0;
+  border-radius: 6px;
+}
+
+.installed-filters button.active {
+  color: var(--accent-color);
+  background: var(--active-bg);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
+}
+
+.installed-filters button > span {
+  min-width: 18px;
+  padding: 2px 6px;
+  font-size: 11px;
+  text-align: center;
+  background: color-mix(in srgb, var(--text-primary) 7%, transparent);
+  border-radius: 10px;
+}
+
+.installed-filters .has-updates {
+  color: white;
+  background: #ef4444;
+}
+
+.installed-more-wrap { position: relative; }
+.installed-more-button {
+  padding: 7px 12px;
+  color: var(--text-primary);
+  font-size: 13px;
+  cursor: pointer;
+  background: color-mix(in srgb, var(--text-primary) 7%, transparent);
+  border: 1px solid var(--divider-color);
+  border-radius: 7px;
+}
+.installed-more-button span { margin-left: 6px; }
+.installed-more-menu {
+  position: absolute;
+  top: 37px;
+  right: 0;
+  z-index: 10;
+  display: flex;
+  width: 180px;
+  flex-direction: column;
+  padding: 5px;
+  background: var(--panel-surface);
+  border: 1px solid var(--divider-color);
+  border-radius: 8px;
+  box-shadow: 0 8px 22px rgba(0, 0, 0, 0.18);
+}
+.installed-more-menu button {
+  padding: 9px;
+  color: var(--text-primary);
+  font-size: 12px;
+  text-align: left;
+  cursor: pointer;
+  background: transparent;
+  border: 0;
+  border-radius: 5px;
+}
+.installed-more-menu button:hover { background: var(--hover-bg); }
+.installed-more-menu button:disabled { opacity: .45; cursor: default; }
+
+.installed-import-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-bottom: 16px;
+  padding: 12px;
+  background: color-mix(in srgb, var(--text-primary) 5%, transparent);
+  border: 1px solid var(--divider-color);
+  border-radius: 8px;
+}
+.installed-import-heading { justify-content: space-between; font-size: 13px; }
+.installed-import-heading button { cursor: pointer; background: none; border: 0; }
+.installed-import-panel input {
+  width: 100%;
+  padding: 8px 10px;
+  color: var(--text-primary);
+  background: var(--panel-surface);
+  border: 1px solid var(--divider-color);
+  border-radius: 6px;
+}
+.installed-import-actions { gap: 8px; }
+.installed-import-actions button {
+  padding: 7px 10px;
+  color: var(--text-primary);
+  font-size: 12px;
+  cursor: pointer;
+  background: var(--active-bg);
+  border: 0;
+  border-radius: 6px;
+}
+.installed-import-actions button:disabled { opacity: .45; cursor: default; }
+
+.installed-list { display: flex; flex-direction: column; gap: 8px; }
+.installed-plugin-card {
+  min-height: 66px;
+  gap: 12px;
+  padding: 12px 14px;
+  cursor: pointer;
+  background: color-mix(in srgb, var(--text-primary) 4%, var(--panel-surface));
+  border: 1px solid var(--divider-color);
+  border-radius: 9px;
+  transition: background .2s, transform .2s;
+}
+.installed-plugin-card:hover { background: var(--hover-bg); transform: translateX(2px); }
+.installed-icon-wrap { position: relative; flex: 0 0 40px; width: 40px; height: 40px; }
+.installed-plugin-icon,
+.installed-plugin-placeholder {
+  display: grid;
+  width: 40px;
+  height: 40px;
+  place-items: center;
+  object-fit: cover;
+  font-size: 24px;
+  background: var(--active-bg);
+  border-radius: 6px;
+}
+.installed-dev-badge {
+  position: absolute; right: -4px; bottom: -4px;
+  padding: 2px 4px; color: white; font-size: 8px; font-weight: 700;
+  background: #389e0d; border: 1px solid var(--panel-surface); border-radius: 99px;
+}
+.installed-update-dot {
+  position: absolute; top: -3px; left: -3px; width: 9px; height: 9px;
+  background: #ef4444; border: 1px solid var(--panel-surface); border-radius: 50%;
+}
+.installed-plugin-info { flex: 1; min-width: 0; }
+.installed-plugin-name {
+  display: flex; align-items: center; gap: 8px; margin-bottom: 4px;
+  color: var(--text-primary); font-size: 16px; font-weight: 600;
+}
+.installed-version {
+  padding: 2px 6px; color: var(--text-muted); font-size: 11px; font-weight: 500;
+  background: var(--active-bg); border-radius: 4px;
+}
+.installed-running {
+  display: inline-flex; align-items: center; gap: 4px; padding: 2px 8px;
+  color: #39a45b; font-size: 11px; font-weight: 500;
+  background: rgba(57, 164, 91, .11); border: 1px solid #39a45b; border-radius: 4px;
+}
+.installed-running i { width: 6px; height: 6px; background: currentColor; border-radius: 50%; }
+.installed-plugin-description {
+  overflow: hidden; color: var(--text-muted); font-size: 13px;
+  text-overflow: ellipsis; white-space: nowrap;
+}
+.installed-plugin-actions,
+.installed-detail-actions { gap: 6px; }
+.installed-plugin-actions button,
+.installed-detail-actions button {
+  display: grid; width: 29px; height: 29px; place-items: center;
+  color: var(--text-muted); font-size: 15px; cursor: pointer;
+  background: transparent; border: 0; border-radius: 6px;
+}
+.installed-plugin-actions button:hover,
+.installed-detail-actions button:hover { color: var(--accent-color); background: var(--active-bg); }
+.installed-plugin-actions button.pinned { color: var(--accent-color); }
+.installed-plugin-actions button:disabled,
+.installed-detail-actions button:disabled { opacity: .4; cursor: default; }
+.installed-empty {
+  display: flex; min-height: 270px; flex-direction: column; align-items: center;
+  justify-content: center; gap: 8px; color: var(--text-muted);
+}
+.installed-empty div { font-size: 58px; opacity: .45; }
+.installed-empty strong { color: var(--text-primary); font-size: 16px; }
+.installed-empty small { font-size: 12px; }
+
+.installed-detail-topbar {
+  justify-content: space-between; height: 39px; margin-bottom: 20px;
+  border-bottom: 1px solid var(--divider-color);
+}
+.installed-back { color: var(--text-primary); font-size: 21px; cursor: pointer; background: none; border: 0; }
+.installed-back span { margin-left: 5px; font-size: 14px; }
+.installed-detail-content { overflow: auto; }
+.installed-detail-heading { gap: 16px; }
+.installed-detail-heading img,
+.installed-detail-placeholder {
+  display: grid; flex: 0 0 76px; width: 76px; height: 76px; place-items: center;
+  object-fit: cover; font-size: 37px; background: var(--active-bg); border-radius: 12px;
+}
+.installed-detail-heading > div:nth-child(2) { flex: 1; }
+.installed-detail-heading h3 { margin: 0 0 7px; color: var(--text-primary); font-size: 21px; }
+.installed-detail-heading p { margin: 0; color: var(--text-muted); font-size: 13px; }
+.installed-detail-heading > button {
+  padding: 8px 12px; color: white; cursor: pointer; background: var(--accent-color);
+  border: 0; border-radius: 7px;
+}
+.installed-detail-meta {
+  display: grid; grid-template-columns: repeat(3, 1fr); margin: 24px 0;
+  border-top: 1px solid var(--divider-color); border-bottom: 1px solid var(--divider-color);
+}
+.installed-detail-meta > div { display: flex; flex-direction: column; gap: 8px; padding: 12px; text-align: center; }
+.installed-detail-meta > div + div { border-left: 1px solid var(--divider-color); }
+.installed-detail-meta small { color: var(--text-muted); font-size: 12px; }
+.installed-detail-meta strong { color: var(--text-primary); font-size: 14px; }
+.installed-detail-tabs { display: flex; gap: 20px; border-bottom: 1px solid var(--divider-color); }
+.installed-detail-tabs button {
+  padding: 10px 3px; color: var(--text-muted); font-size: 13px;
+  cursor: pointer; background: transparent; border: 0; border-bottom: 2px solid transparent;
+}
+.installed-detail-tabs button.active { color: var(--accent-color); border-bottom-color: var(--accent-color); }
+.installed-detail-tab-content { display: flex; min-height: 130px; flex-direction: column; gap: 12px; padding: 18px 2px; color: var(--text-muted); font-size: 13px; }
+.installed-detail-tab-content p { margin: 0; }
+.installed-detail-tab-content button,
+.installed-detail-footer button { align-self: flex-start; padding: 7px 10px; cursor: pointer; background: var(--active-bg); border: 0; border-radius: 6px; }
+.installed-feature-card {
+  display: flex; align-items: center; justify-content: space-between; padding: 10px 12px;
+  border: 1px solid var(--divider-color); border-radius: 8px;
+}
+.installed-feature-card > div { display: flex; flex-direction: column; gap: 4px; }
+.installed-feature-card small { color: var(--text-muted); }
+.installed-detail-footer { padding-top: 10px; border-top: 1px solid var(--divider-color); }
+.installed-detail-footer button { color: #d9535c; }
+.installed-feedback { position: sticky; bottom: 0; padding: 8px; background: var(--panel-surface); }
+.installed-readme {
+  max-width: 100%;
+  margin: 0;
+  color: var(--text-primary);
+  font-family: inherit;
+  font-size: 13px;
+  line-height: 1.65;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.installed-data-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 9px 12px;
+  border: 1px solid var(--divider-color);
+  border-radius: 7px;
+}
+.installed-data-row > span { display: flex; min-width: 0; flex-direction: column; gap: 4px; }
+.installed-data-row strong { overflow: hidden; color: var(--text-primary); text-overflow: ellipsis; white-space: nowrap; }

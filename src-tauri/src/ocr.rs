@@ -4,7 +4,7 @@ use std::sync::Mutex;
 use serde::Serialize;
 use tauri::{
     ipc::{InvokeBody, Request},
-    Manager, WebviewWindow,
+    Manager, Webview,
 };
 
 static OCR_BUSY: Mutex<()> = Mutex::new(());
@@ -22,7 +22,7 @@ pub(crate) struct OcrResult {
  * @param window 发起调用的 Webview。
  * @returns 校验结果。
  */
-fn require_plugin(window: &WebviewWindow) -> Result<(), String> {
+fn require_plugin(window: &Webview) -> Result<(), String> {
     if window.label() == "plugin-screenshot" {
         return Ok(());
     }
@@ -40,10 +40,7 @@ fn require_plugin(window: &WebviewWindow) -> Result<(), String> {
  * @returns 识别文本、实际语言及本地引擎名称。
  */
 #[tauri::command]
-pub(crate) async fn plugin_ocr(
-    request: Request<'_>,
-    window: WebviewWindow,
-) -> Result<OcrResult, String> {
+pub(crate) async fn plugin_ocr(request: Request<'_>, window: Webview) -> Result<OcrResult, String> {
     require_plugin(&window)?;
     let data = match request.body() {
         InvokeBody::Raw(data) if !data.is_empty() && data.len() <= 32 * 1024 * 1024 => data.clone(),
@@ -125,10 +122,7 @@ fn decode_image(data: &[u8]) -> Result<image::DynamicImage, String> {
  * @returns 剪贴板写入结果。
  */
 #[tauri::command]
-pub(crate) async fn plugin_ocr_copy_text(
-    text: String,
-    window: WebviewWindow,
-) -> Result<(), String> {
+pub(crate) async fn plugin_ocr_copy_text(text: String, window: Webview) -> Result<(), String> {
     require_plugin(&window)?;
     if text.len() > 1024 * 1024 {
         return Err("识别文本过长".to_owned());
