@@ -1690,7 +1690,7 @@ onUnmounted(() => {
       <span v-if="activePlugin" class="active-plugin-title">{{ activePlugin.title }}</span>
       <button v-if="activePlugin" type="button" class="active-plugin-close" title="关闭插件" @click="closeActivePlugin">×</button>
       <span v-if="query" class="tab-hint">切换选中 <kbd>Tab</kbd></span>
-      <button class="profile-button" title="设置" @click="openSettings">
+      <button class="profile-button" :title="settingsOpen ? '返回搜索' : '设置'" @click="settingsOpen ? settingsOpen = false : openSettings()">
         <img :src="ztoolsLogo" alt="ZTools" />
       </button>
     </section>
@@ -1889,17 +1889,6 @@ onUnmounted(() => {
 
     <div v-if="settingsOpen" class="settings-workspace">
       <form class="settings-card" @submit.prevent="saveSettings">
-        <header>
-          <div class="settings-plugin-tabs">
-            <span class="settings-plugin-home"><b><img :src="ztoolsLogo" alt="" /></b> 设置</span>
-            <span class="settings-plugin-page">设置 <button type="button" @click="settingsOpen = false">×</button></span>
-          </div>
-          <span class="settings-more" aria-hidden="true">⋮</span>
-          <button type="button" class="profile-button" title="返回搜索" @click="settingsOpen = false">
-            <img :src="ztoolsLogo" alt="ZTools" />
-          </button>
-        </header>
-
         <nav class="settings-tabs" aria-label="设置类别">
           <button
             type="button"
