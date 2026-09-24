@@ -150,7 +150,7 @@ pub(crate) fn read_clipboard_files() -> Result<Option<Vec<PathBuf>>, String> {
         }
         let paths: Vec<PathBuf> = clipboard_win::get_clipboard(FileList)
             .map_err(|error| format!("读取文件剪贴板失败：{error}"))?;
-        return Ok((!paths.is_empty()).then_some(paths));
+        Ok((!paths.is_empty()).then_some(paths))
     }
     #[cfg(not(target_os = "windows"))]
     {
@@ -176,9 +176,9 @@ pub(crate) fn write_clipboard_files(paths: &[PathBuf]) -> Result<(), String> {
             .collect::<Vec<_>>();
         let _clipboard = clipboard_win::Clipboard::new_attempts(10)
             .map_err(|error| format!("无法打开文件剪贴板：{error}"))?;
-        return FileList
+        FileList
             .write_clipboard(strings.as_slice())
-            .map_err(|error| format!("写入文件剪贴板失败：{error}"));
+            .map_err(|error| format!("写入文件剪贴板失败：{error}"))
     }
     #[cfg(not(target_os = "windows"))]
     {
