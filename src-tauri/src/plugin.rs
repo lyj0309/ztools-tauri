@@ -1127,37 +1127,52 @@ pub(crate) fn launch_plugin(
     let label = plugin_window_label(plugin_name);
     let action_json = serde_json::to_string(&action).map_err(|error| error.to_string())?;
     let restore_main_on_close = !(plugin_name == "break-reminder" && action.code == "break");
+    let embed_in_main = restore_main_on_close
+        && !(std::env::var("ZTOOLS_E2E").as_deref() == Ok("1")
+            && std::env::var_os("ZTOOLS_E2E_PLUGIN_NAME").is_some()
+            && std::env::var_os("ZTOOLS_E2E_EMBED_PLUGIN").is_none());
 
     // 普通插件优先复用主窗口搜索框下方的子 Webview，避免重复创建弹窗。
     if let Some(webview) = app.get_webview(&label) {
         if webview.window().label() == "main" {
-            runtime.set_restore_main_on_close(&label, true)?;
-            let payload_paths = plugin_payload_paths(&action.payload);
-            if !payload_paths.is_empty() {
-                runtime.grant_paths(&label, payload_paths)?;
+            if !embed_in_main {
+                // 同一插件从设置页进入定时提醒时，先释放嵌入视图的单例标签。
+                close_plugin_window(app, plugin_name)?;
+            } else {
+                runtime.set_restore_main_on_close(&label, true)?;
+                let payload_paths = plugin_payload_paths(&action.payload);
+                if !payload_paths.is_empty() {
+                    runtime.grant_paths(&label, payload_paths)?;
+                }
+                webview
+                    .eval(format!("window.__ztoolsDispatchEnter?.({action_json})"))
+                    .map_err(|error| error.to_string())?;
+                show_embedded_plugin(app, &webview, &manifest.title)?;
+                return Ok(());
             }
-            webview
-                .eval(format!("window.__ztoolsDispatchEnter?.({action_json})"))
-                .map_err(|error| error.to_string())?;
-            show_embedded_plugin(app, &webview, &manifest.title)?;
-            return Ok(());
         }
     }
 
     if let Some(window) = app.get_webview_window(&label) {
-        // 复用单例窗口时先派发新的进入动作，再恢复窗口焦点。
-        runtime.set_restore_main_on_close(&label, restore_main_on_close)?;
-        let payload_paths = plugin_payload_paths(&action.payload);
-        if !payload_paths.is_empty() {
-            runtime.grant_paths(&label, payload_paths)?;
+        if embed_in_main {
+            // 关闭旧独立视图后再创建子视图，避免设置页沿用提醒弹窗。
+            window.close().map_err(|error| error.to_string())?;
+            runtime.unregister_instance(&label);
+        } else {
+            // 复用单例窗口时先派发新的进入动作，再恢复窗口焦点。
+            runtime.set_restore_main_on_close(&label, restore_main_on_close)?;
+            let payload_paths = plugin_payload_paths(&action.payload);
+            if !payload_paths.is_empty() {
+                runtime.grant_paths(&label, payload_paths)?;
+            }
+            window
+                .eval(format!("window.__ztoolsDispatchEnter?.({action_json})"))
+                .map_err(|error| error.to_string())?;
+            hide_main_window(app)?;
+            window.show().map_err(|error| error.to_string())?;
+            window.set_focus().map_err(|error| error.to_string())?;
+            return Ok(());
         }
-        window
-            .eval(format!("window.__ztoolsDispatchEnter?.({action_json})"))
-            .map_err(|error| error.to_string())?;
-        hide_main_window(app)?;
-        window.show().map_err(|error| error.to_string())?;
-        window.set_focus().map_err(|error| error.to_string())?;
-        return Ok(());
     }
 
     let main_url = format!(
@@ -1225,9 +1240,6 @@ pub(crate) fn launch_plugin(
             return Err(error);
         }
     }
-    let embed_in_main = plugin_name != "break-reminder"
-        && !(std::env::var("ZTOOLS_E2E").as_deref() == Ok("1")
-            && std::env::var_os("ZTOOLS_E2E_PLUGIN_NAME").is_some());
     if embed_in_main {
         // 子 Webview 与主窗口共享外壳，但继续使用独立标签校验插件 API 和私有协议。
         let main = app

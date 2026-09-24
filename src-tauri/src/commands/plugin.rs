@@ -1056,7 +1056,14 @@ pub(crate) async fn plugin_dialog_save(
     Ok(Some(path.to_string_lossy().into_owned()))
 }
 
-/// 调整当前插件窗口客户区尺寸，并限制异常或不可用大小。
+/**
+ * 调整独立插件窗口客户区尺寸；内嵌插件保持主搜索工作区的固定布局。
+ * @param width 请求的客户区宽度。
+ * @param height 请求的客户区高度。
+ * @param window 发起请求的插件 Webview。
+ * @param runtime 插件身份注册表。
+ * @returns 尺寸更新结果，内嵌视图返回成功而不改变宿主窗口。
+ */
 #[tauri::command]
 pub(crate) fn plugin_window_set_size(
     width: f64,
@@ -1068,12 +1075,24 @@ pub(crate) fn plugin_window_set_size(
     if !(240.0..=3840.0).contains(&width) || !(160.0..=2160.0).contains(&height) {
         return Err("插件窗口尺寸超出 240×160 到 3840×2160 的范围".to_owned());
     }
+    // 内嵌视图的尺寸由宿主统一控制，不能让插件覆盖搜索框或缩小自身视口。
+    if window.window().label() == "main" {
+        return Ok(());
+    }
     window
+        .window()
         .set_size(tauri::LogicalSize::new(width, height))
         .map_err(|error| error.to_string())
 }
 
-/// 调整当前插件窗口位置，并拒绝非有限坐标。
+/**
+ * 移动独立插件窗口；内嵌插件始终固定在主搜索框下方。
+ * @param x 请求的横坐标。
+ * @param y 请求的纵坐标。
+ * @param window 发起请求的插件 Webview。
+ * @param runtime 插件身份注册表。
+ * @returns 位置更新结果，内嵌视图返回成功而不改变宿主布局。
+ */
 #[tauri::command]
 pub(crate) fn plugin_window_set_position(
     x: f64,
@@ -1085,7 +1104,12 @@ pub(crate) fn plugin_window_set_position(
     if !x.is_finite() || !y.is_finite() {
         return Err("插件窗口坐标必须是有限数值".to_owned());
     }
+    // 主窗口由启动器控制位置，插件只能移动自己的独立窗口。
+    if window.window().label() == "main" {
+        return Ok(());
+    }
     window
+        .window()
         .set_position(tauri::LogicalPosition::new(x, y))
         .map_err(|error| error.to_string())
 }

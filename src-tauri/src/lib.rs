@@ -285,7 +285,7 @@ fn configure_linux_launcher_minimum_height(window: &tauri::WebviewWindow) {
 }
 
 /**
- * 在隔离测试模式下启动指定插件，截图与历史贴图走正式入口。
+ * 在隔离测试模式下启动指定插件，内嵌测试等待主页面订阅事件后再进入。
  * @param app 桌面宿主句柄。
  * @returns 启动任务提交结果。
  */
@@ -332,6 +332,19 @@ fn launch_e2e_plugin(app: &tauri::AppHandle) -> Result<(), Box<dyn std::error::E
         kind: if payload.is_array() { "files" } else { "text" }.to_owned(),
         payload,
     };
+    if std::env::var_os("ZTOOLS_E2E_EMBED_PLUGIN").is_some() {
+        let test_app = app.clone();
+        std::thread::spawn(move || {
+            // 测试模式在宿主 setup 阶段运行；先等前端挂载，避免错过内嵌视图事件。
+            std::thread::sleep(std::time::Duration::from_millis(2500));
+            let test_runtime = test_app.state::<plugin::PluginRuntime>();
+            match plugin::launch_plugin(&test_app, &test_runtime, &plugin_name, action) {
+                Ok(()) => eprintln!("[e2e] embedded plugin launch completed"),
+                Err(error) => eprintln!("[e2e] embedded plugin launch failed: {error}"),
+            }
+        });
+        return Ok(());
+    }
     plugin::launch_plugin(app, &runtime, &plugin_name, action).map_err(io::Error::other)?;
     eprintln!("[e2e] plugin launch completed");
     Ok(())

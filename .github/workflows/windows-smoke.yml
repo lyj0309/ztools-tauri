@@ -225,6 +225,7 @@ jobs:
             editorVisible = $false
             pinVisible = $false
             breakSettingsVisible = $false
+            breakSettingsEmbedded = $false
             breakSkipClosedWindow = $false
           }
 
@@ -369,21 +370,33 @@ jobs:
             Save-DesktopScreenshot -Path 'artifacts/08-history-pin.png'
 
             if ([version]$env:RELEASE_TAG.TrimStart('v') -ge [version]'0.1.17') {
-              # 从便携版打开内置休息提醒，页面完成 JS 布局后才能达到目标尺寸。
+              # 新版设置页嵌入主搜索框，真实提醒仍使用独立窗口。
               Stop-TestProcess -Process $historyProcess
               $env:ZTOOLS_E2E_PLUGIN_NAME = 'break-reminder'
               $env:ZTOOLS_E2E_PLUGIN_FEATURE = 'settings'
+              $embedBreakSettings = [version]$env:RELEASE_TAG.TrimStart('v') -ge [version]'0.1.19'
+              if ($embedBreakSettings) { $env:ZTOOLS_E2E_EMBED_PLUGIN = '1' }
               $breakSettingsProcess = Start-Process -FilePath $executable -PassThru `
                 -RedirectStandardOutput 'artifacts/break-settings-stdout.log' `
                 -RedirectStandardError 'artifacts/break-settings-stderr.log'
-              $settingsWindow = Wait-WindowByTitleNearSize -Title '休息提醒' `
-                -ExpectedWidth 540 -ExpectedHeight 570 -Tolerance 80
+              if ($embedBreakSettings) {
+                $settingsWindow = Wait-WindowByTitleNearSize -Title 'ZTools' `
+                  -ExpectedWidth 800 -ExpectedHeight 600 -Tolerance 80
+                if ([DesktopNative]::FindVisibleWindowByTitleNearSize('休息提醒', 540, 570) -ne [IntPtr]::Zero) {
+                  throw 'Break settings opened an extra plugin window'
+                }
+                $diagnostics.breakSettingsEmbedded = $true
+              } else {
+                $settingsWindow = Wait-WindowByTitleNearSize -Title '休息提醒' `
+                  -ExpectedWidth 540 -ExpectedHeight 570 -Tolerance 80
+              }
               $diagnostics.breakSettingsVisible = $true
               Save-DesktopScreenshot -Path 'artifacts/10-break-settings.png'
               Stop-TestProcess -Process $breakSettingsProcess
               Start-Sleep -Seconds 2
 
               # 单独打开休息页，用真实按键触发唯一的“跳过本次提醒”按钮。
+              Remove-Item Env:ZTOOLS_E2E_EMBED_PLUGIN -ErrorAction SilentlyContinue
               $env:ZTOOLS_E2E_PLUGIN_FEATURE = 'break'
               $env:ZTOOLS_E2E_PLUGIN_PAYLOAD = '{"durationSeconds":120}'
               $breakProcess = Start-Process -FilePath $executable -PassThru `
