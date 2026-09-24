@@ -225,6 +225,7 @@ jobs:
             editorVisible = $false
             pinVisible = $false
             clipboardVisible = $false
+            clipboardFileTabVisible = $false
             breakSettingsVisible = $false
             breakSettingsEmbedded = $false
             breakSettingsDetached = $false
@@ -496,6 +497,29 @@ jobs:
               Save-DesktopScreenshot -Path 'artifacts/13-clipboard.png'
               $diagnostics.clipboardVisible = [DesktopNative]::IsWindowVisible($clipboardWindow)
               if (-not $diagnostics.clipboardVisible) { throw 'Original clipboard plugin is not visible' }
+
+              # 使用 Windows 原生 CF_HDROP 放入文件路径，检查文件历史页的真实桌面渲染。
+              $clipboardFile = Join-Path $testRoot 'clipboard-file.txt'
+              Set-Content -Path $clipboardFile -Value 'ZTools clipboard file fixture'
+              $clipboardScript = Join-Path $testRoot 'set-file-clipboard.ps1'
+              @'
+          param([string]$Path)
+          Add-Type -AssemblyName System.Windows.Forms
+          $files = New-Object System.Collections.Specialized.StringCollection
+          [void]$files.Add($Path)
+          [System.Windows.Forms.Clipboard]::SetFileDropList($files)
+          '@ | Set-Content -Path $clipboardScript -Encoding UTF8
+              & powershell.exe -NoProfile -STA -File $clipboardScript $clipboardFile
+              if ($LASTEXITCODE -ne 0) { throw 'Could not set Windows file clipboard' }
+              Start-Sleep -Seconds 3
+              $clipboardRect = New-Object DesktopNative+Rect
+              [DesktopNative]::GetWindowRect($clipboardWindow, [ref]$clipboardRect) | Out-Null
+              [DesktopNative]::SetCursorPos($clipboardRect.Left + 320, $clipboardRect.Top + 84) | Out-Null
+              [DesktopNative]::mouse_event(0x0002, 0, 0, 0, [UIntPtr]::Zero)
+              [DesktopNative]::mouse_event(0x0004, 0, 0, 0, [UIntPtr]::Zero)
+              Start-Sleep -Seconds 1
+              Save-DesktopScreenshot -Path 'artifacts/14-clipboard-files.png'
+              $diagnostics.clipboardFileTabVisible = [DesktopNative]::IsWindowVisible($clipboardWindow)
             }
           } catch {
             $diagnostics.error = $_.Exception.Message
