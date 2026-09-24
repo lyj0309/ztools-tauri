@@ -224,6 +224,7 @@ jobs:
             launcherVisible = $false
             editorVisible = $false
             pinVisible = $false
+            clipboardVisible = $false
             breakSettingsVisible = $false
             breakSettingsEmbedded = $false
             breakSettingsDetached = $false
@@ -235,6 +236,7 @@ jobs:
           $historyProcess = $null
           $breakSettingsProcess = $null
           $breakProcess = $null
+          $clipboardProcess = $null
           try {
             Remove-Item Env:ZTOOLS_E2E_PLUGIN_NAME -ErrorAction SilentlyContinue
             Remove-Item Env:ZTOOLS_E2E_PLUGIN_FEATURE -ErrorAction SilentlyContinue
@@ -477,6 +479,24 @@ jobs:
               $diagnostics.breakSkipClosedWindow = $true
               Save-DesktopScreenshot -Path 'artifacts/12-break-skipped.png'
             }
+
+            if ([version]$env:RELEASE_TAG.TrimStart('v') -ge [version]'0.1.22') {
+              # 用当前便携包打开内置原版剪贴板，验证 Windows 子 Webview 和文本监控一起启动。
+              Stop-TestProcess -Process $breakProcess
+              Remove-Item Env:ZTOOLS_E2E_PLUGIN_PAYLOAD -ErrorAction SilentlyContinue
+              $env:ZTOOLS_E2E_PLUGIN_NAME = 'clipboard'
+              $env:ZTOOLS_E2E_PLUGIN_FEATURE = 'clipboard'
+              $env:ZTOOLS_E2E_EMBED_PLUGIN = '1'
+              Set-Clipboard -Value 'ZTOOLS_CLIPBOARD_WIN_SMOKE'
+              $clipboardProcess = Start-Process -FilePath $executable -PassThru `
+                -RedirectStandardOutput 'artifacts/clipboard-stdout.log' `
+                -RedirectStandardError 'artifacts/clipboard-stderr.log'
+              $clipboardWindow = Wait-ProcessWindow -ProcessId $clipboardProcess.Id -MinWidth 700 -MinHeight 550
+              Start-Sleep -Seconds 5
+              Save-DesktopScreenshot -Path 'artifacts/13-clipboard.png'
+              $diagnostics.clipboardVisible = [DesktopNative]::IsWindowVisible($clipboardWindow)
+              if (-not $diagnostics.clipboardVisible) { throw 'Original clipboard plugin is not visible' }
+            }
           } catch {
             $diagnostics.error = $_.Exception.Message
             Save-DesktopScreenshot -Path 'artifacts/99-error.png'
@@ -488,6 +508,7 @@ jobs:
             Stop-TestProcess -Process $historyProcess
             Stop-TestProcess -Process $breakSettingsProcess
             Stop-TestProcess -Process $breakProcess
+            Stop-TestProcess -Process $clipboardProcess
           }
 
       - name: Upload Windows desktop evidence
