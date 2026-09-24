@@ -406,10 +406,14 @@ jobs:
                 -ExpectedWidth 440 -ExpectedHeight 400 -Tolerance 80
               Save-DesktopScreenshot -Path 'artifacts/11-break-reminder.png'
               [DesktopNative]::SetForegroundWindow($breakWindow) | Out-Null
-              [DesktopNative]::keybd_event(0x09, 0, 0, [UIntPtr]::Zero)
-              [DesktopNative]::keybd_event(0x09, 0, 0x0002, [UIntPtr]::Zero)
-              [DesktopNative]::keybd_event(0x0D, 0, 0, [UIntPtr]::Zero)
-              [DesktopNative]::keybd_event(0x0D, 0, 0x0002, [UIntPtr]::Zero)
+              $breakRect = New-Object DesktopNative+Rect
+              [DesktopNative]::GetWindowRect($breakWindow, [ref]$breakRect) | Out-Null
+              # WebView2 的初始键盘焦点不稳定，直接点击可见按钮验证真实鼠标交互。
+              [DesktopNative]::SetCursorPos(
+                [int](($breakRect.Left + $breakRect.Right) / 2), $breakRect.Bottom - 50
+              ) | Out-Null
+              [DesktopNative]::mouse_event(0x0002, 0, 0, 0, [UIntPtr]::Zero)
+              [DesktopNative]::mouse_event(0x0004, 0, 0, 0, [UIntPtr]::Zero)
               Start-Sleep -Seconds 2
               if ([DesktopNative]::IsWindowVisible($breakWindow)) {
                 throw 'Skip button did not close the break reminder'
