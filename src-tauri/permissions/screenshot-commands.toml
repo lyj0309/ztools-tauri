@@ -5,6 +5,7 @@ commands.allow = [
   "plugin_ocr",
   "plugin_ocr_copy_text",
   "screenshot_editor_source",
+  "screenshot_editor_select",
   "screenshot_editor_info",
   "screenshot_editor_ready",
   "screenshot_save",

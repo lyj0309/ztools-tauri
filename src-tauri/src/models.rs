@@ -51,6 +51,23 @@ pub(crate) struct ClipboardImageEntry {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ClipboardFileItem {
+    pub(crate) name: String,
+    pub(crate) path: String,
+    pub(crate) is_directory: bool,
+    pub(crate) exists: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ClipboardFilesEntry {
+    pub(crate) id: i64,
+    pub(crate) files: Vec<ClipboardFileItem>,
+    pub(crate) captured_at: i64,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(default, rename_all = "camelCase")]
 pub(crate) struct LauncherSettings {
     pub(crate) shortcut: String,

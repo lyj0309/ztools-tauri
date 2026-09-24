@@ -1,4 +1,4 @@
-use std::{fs, path::PathBuf};
+use std::{fs, path::PathBuf, sync::Mutex};
 
 use tauri::{AppHandle, Emitter, Manager, State, Webview};
 use tauri_plugin_notification::{NotificationExt, PermissionState};
@@ -47,8 +47,10 @@ use crate::{
         self, InstalledPlugin, MarketPlugin, PluginEnterAction, PluginFeature, PluginRuntime,
     },
     state::AppState,
-    storage::PluginDataItem,
+    storage::{PluginDataItem, Store},
 };
+
+static CLIPBOARD_SUB_INPUT: Mutex<String> = Mutex::new(String::new());
 
 #[derive(serde::Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -57,7 +59,11 @@ pub(crate) struct InstalledPluginDetail {
     data: Vec<PluginDataItem>,
 }
 
-/// 把宿主纯文本记录转换为旧剪贴板插件可识别的项目结构。
+/**
+ * 把宿主纯文本记录转换为原版剪贴板插件的项目结构。
+ * @param entry 一条文本历史记录。
+ * @returns 插件可直接展示的项目。
+ */
 fn clipboard_item(entry: ClipboardEntry) -> serde_json::Value {
     let preview = entry.content.clone();
     serde_json::json!({
@@ -68,6 +74,80 @@ fn clipboard_item(entry: ClipboardEntry) -> serde_json::Value {
         "timestamp": entry.captured_at,
         "appName": null
     })
+}
+
+/**
+ * 合并文字和图片历史，并按原版插件的分类与时间顺序返回。
+ * @param store 已加锁的本地数据库。
+ * @param kind 可选的原版分类名。
+ * @returns 已排序的插件项目或数据库错误。
+ */
+fn clipboard_items(store: &Store, kind: Option<&str>) -> Result<Vec<serde_json::Value>, String> {
+    let mut items = Vec::new();
+    // 原版“全部”分类需要合并两张表，图片预览使用已生成的缩略图，避免传输原图。
+    if matches!(kind, None | Some("all" | "text")) {
+        items.extend(
+            store
+                .clipboard_history(100)?
+                .into_iter()
+                .map(clipboard_item),
+        );
+    }
+    if matches!(kind, None | Some("all" | "image")) {
+        items.extend(store.clipboard_images()?.into_iter().map(|entry| {
+            serde_json::json!({
+                "id": format!("image-{}", entry.id),
+                "type": "image",
+                "imagePath": format!("image-{}", entry.id),
+                "preview": entry.thumbnail,
+                "resolution": format!("{} × {}", entry.width, entry.height),
+                "timestamp": entry.captured_at,
+                "appName": null
+            })
+        }));
+    }
+    if matches!(kind, None | Some("all" | "file" | "files")) {
+        items.extend(store.clipboard_files()?.into_iter().map(|entry| {
+            let preview = entry
+                .files
+                .iter()
+                .map(|file| file.name.as_str())
+                .collect::<Vec<_>>()
+                .join("\n");
+            serde_json::json!({
+                "id": format!("files-{}", entry.id),
+                "type": "file",
+                "files": entry.files,
+                "preview": preview,
+                "timestamp": entry.captured_at,
+                "appName": null
+            })
+        }));
+    }
+    items.sort_by(|left, right| right["timestamp"].as_i64().cmp(&left["timestamp"].as_i64()));
+    Ok(items)
+}
+
+/**
+ * 解析原版插件项目 ID，区分文字与图片数据库记录。
+ * @param id 原版插件传回的项目 ID。
+ * @returns 数据分类与数据库整数 ID，格式不合法时返回错误。
+ */
+fn parse_clipboard_id(id: &str) -> Result<(&'static str, i64), String> {
+    let (kind, raw) = match id.strip_prefix("image-") {
+        Some(value) => ("image", value),
+        None => match id.strip_prefix("files-") {
+            Some(value) => ("files", value),
+            None => ("text", id),
+        },
+    };
+    let parsed = raw
+        .parse::<i64>()
+        .map_err(|_| "剪贴板记录 ID 无效".to_owned())?;
+    if parsed <= 0 {
+        return Err("剪贴板记录 ID 无效".to_owned());
+    }
+    Ok((kind, parsed))
 }
 
 /// 返回已经安装且 manifest 有效的插件列表。
@@ -209,7 +289,7 @@ pub(crate) async fn launch_plugin_feature(
         return Ok(());
     }
     if plugin_name == "screenshot" {
-        if feature_code != "capture" && feature_code != "pin" {
+        if !matches!(feature_code.as_str(), "capture" | "copy" | "save" | "pin") {
             return Err("未知的截图插件功能".to_owned());
         }
         let main = app
@@ -219,7 +299,7 @@ pub(crate) async fn launch_plugin_feature(
         if feature_code == "pin" {
             crate::screenshot::start_history(app.clone(), main).await?;
         } else {
-            crate::screenshot::start_editor(app.clone(), main).await?;
+            crate::screenshot::start_editor(app.clone(), main, &feature_code).await?;
         }
         return Ok(());
     }
@@ -271,44 +351,67 @@ pub(crate) async fn plugin_copy_text(
     Ok(())
 }
 
-/// 返回当前宿主的纯文本剪贴板历史，并按插件请求分页和筛选。
+/**
+ * 返回合并后的文字与图片历史，供原版剪贴板界面分页和筛选。
+ * @param page 一起始页码。
+ * @param page_size 每页条数。
+ * @param kind 可选分类。
+ * @param query 原版宿主搜索框中的筛选词。
+ * @param window 发起请求的插件 Webview。
+ * @param runtime 插件身份注册表。
+ * @param state SQLite 数据状态。
+ * @returns 带总数和本页记录的对象。
+ */
 #[tauri::command]
 pub(crate) fn plugin_clipboard_get_history(
     page: usize,
     page_size: usize,
     kind: Option<String>,
+    query: Option<String>,
     window: Webview,
     runtime: State<'_, PluginRuntime>,
     state: State<'_, AppState>,
 ) -> Result<serde_json::Value, String> {
     runtime.plugin_for_window(window.label())?;
-    if page == 0 || page_size == 0 || page_size > 100 {
+    if page == 0 || page_size == 0 || page_size > 300 {
         return Err("剪贴板分页参数超出范围".to_owned());
     }
-    let history = state
+    let store = state
         .store
         .lock()
-        .map_err(|_| "数据库锁已损坏".to_owned())?
-        .clipboard_history(100)?;
-    let accepted = kind
-        .as_deref()
-        .map_or(true, |value| matches!(value, "all" | "text"));
-    let total = if accepted { history.len() } else { 0 };
+        .map_err(|_| "数据库锁已损坏".to_owned())?;
+    let mut history = clipboard_items(&store, kind.as_deref())?;
+    if let Some(query) = query.as_deref().filter(|value| !value.is_empty()) {
+        if query.chars().count() > 500 {
+            return Err("剪贴板搜索词不能超过 500 个字符".to_owned());
+        }
+        let needle = query.to_lowercase();
+        history.retain(|item| {
+            ["content", "preview"].iter().any(|field| {
+                item[*field]
+                    .as_str()
+                    .is_some_and(|value| value.to_lowercase().contains(&needle))
+            })
+        });
+    }
+    let total = history.len();
     let start = (page - 1).saturating_mul(page_size).min(total);
-    let items = if accepted {
-        history
-            .into_iter()
-            .skip(start)
-            .take(page_size)
-            .map(clipboard_item)
-            .collect::<Vec<_>>()
-    } else {
-        Vec::new()
-    };
+    let items = history
+        .into_iter()
+        .skip(start)
+        .take(page_size)
+        .collect::<Vec<_>>();
     Ok(serde_json::json!({ "items": items, "total": total }))
 }
 
-/// 在当前宿主的纯文本剪贴板历史中执行不区分大小写的包含搜索。
+/**
+ * 在本地文字历史中搜索，并在空查询时返回全部文字与图片记录。
+ * @param query 用户输入的搜索内容。
+ * @param window 发起请求的插件 Webview。
+ * @param runtime 插件身份注册表。
+ * @param state SQLite 数据状态。
+ * @returns 按时间排序的匹配项目。
+ */
 #[tauri::command]
 pub(crate) fn plugin_clipboard_search(
     query: String,
@@ -321,22 +424,36 @@ pub(crate) fn plugin_clipboard_search(
         return Err("剪贴板搜索词不能超过 500 个字符".to_owned());
     }
     let normalized = query.to_lowercase();
-    let history = state
+    let store = state
         .store
         .lock()
-        .map_err(|_| "数据库锁已损坏".to_owned())?
-        .clipboard_history(100)?;
-    Ok(history
+        .map_err(|_| "数据库锁已损坏".to_owned())?;
+    let items = clipboard_items(&store, None)?;
+    Ok(items
         .into_iter()
-        .filter(|entry| entry.content.to_lowercase().contains(&normalized))
-        .map(clipboard_item)
+        .filter(|item| {
+            normalized.is_empty()
+                || ["content", "preview"].iter().any(|field| {
+                    item[*field]
+                        .as_str()
+                        .is_some_and(|value| value.to_lowercase().contains(&normalized))
+                })
+        })
         .collect())
 }
 
-/// 删除一条宿主剪贴板历史，并通知主窗口刷新列表。
+/**
+ * 删除文字或图片历史，并通知主窗口刷新旧列表。
+ * @param id 原版插件传回的项目 ID。
+ * @param window 发起请求的插件 Webview。
+ * @param app 桌面应用句柄。
+ * @param runtime 插件身份注册表。
+ * @param state SQLite 数据状态。
+ * @returns 删除成功标记。
+ */
 #[tauri::command]
 pub(crate) fn plugin_clipboard_delete(
-    id: i64,
+    id: String,
     window: Webview,
     app: AppHandle,
     runtime: State<'_, PluginRuntime>,
@@ -347,7 +464,12 @@ pub(crate) fn plugin_clipboard_delete(
         .store
         .lock()
         .map_err(|_| "数据库锁已损坏".to_owned())?;
-    store.delete_clipboard_entry(id)?;
+    let (kind, numeric_id) = parse_clipboard_id(&id)?;
+    match kind {
+        "image" => store.delete_clipboard_image(numeric_id)?,
+        "files" => store.delete_clipboard_files(numeric_id)?,
+        _ => store.delete_clipboard_entry(numeric_id)?,
+    }
     let history = store.clipboard_history(100)?;
     app.emit("clipboard-history-updated", history)
         .map_err(|error| error.to_string())?;
@@ -373,26 +495,66 @@ pub(crate) fn plugin_clipboard_clear(
     Ok(true)
 }
 
-/// 将指定历史文本重新写入剪贴板，并可隐藏插件后粘贴到原前台应用。
+/**
+ * 将指定文字或图片历史写回系统剪贴板，可继续粘贴到原前台应用。
+ * @param id 原版插件传回的项目 ID。
+ * @param should_paste 是否自动模拟粘贴。
+ * @param window 发起请求的插件 Webview。
+ * @param runtime 插件身份注册表。
+ * @param state SQLite 数据状态。
+ * @returns 写入成功标记。
+ */
 #[tauri::command]
 pub(crate) async fn plugin_clipboard_write_history(
-    id: i64,
+    id: String,
     should_paste: bool,
     window: Webview,
     runtime: State<'_, PluginRuntime>,
     state: State<'_, AppState>,
 ) -> Result<bool, String> {
     runtime.plugin_for_window(window.label())?;
-    let content = state
-        .store
-        .lock()
-        .map_err(|_| "数据库锁已损坏".to_owned())?
-        .clipboard_history(100)?
-        .into_iter()
-        .find(|entry| entry.id == id)
-        .map(|entry| entry.content)
-        .ok_or_else(|| "剪贴板历史记录不存在".to_owned())?;
-    desktop::write_clipboard_text(content)?;
+    let (kind, numeric_id) = parse_clipboard_id(&id)?;
+    // 在可能等待系统粘贴之前释放 SQLite 锁；锁不允许跨异步等待边界保留。
+    let (png, content, files) = {
+        let store = state
+            .store
+            .lock()
+            .map_err(|_| "数据库锁已损坏".to_owned())?;
+        match kind {
+            "image" => (Some(store.clipboard_image_png(numeric_id)?), None, None),
+            "files" => {
+                let files = store
+                    .clipboard_files()?
+                    .into_iter()
+                    .find(|entry| entry.id == numeric_id)
+                    .ok_or_else(|| "文件剪贴板历史记录不存在".to_owned())?;
+                let paths = files
+                    .files
+                    .into_iter()
+                    .map(|file| PathBuf::from(file.path))
+                    .collect::<Vec<_>>();
+                (None, None, Some(paths))
+            }
+            _ => {
+                let content = store
+                    .clipboard_history(100)?
+                    .into_iter()
+                    .find(|entry| entry.id == numeric_id)
+                    .map(|entry| entry.content)
+                    .ok_or_else(|| "剪贴板历史记录不存在".to_owned())?;
+                (None, Some(content), None)
+            }
+        }
+    };
+    if let Some(png) = png {
+        desktop::write_clipboard_image_png(&png)?;
+    }
+    if let Some(content) = content {
+        desktop::write_clipboard_text(content)?;
+    }
+    if let Some(files) = files {
+        desktop::write_clipboard_files(&files)?;
+    }
     if should_paste {
         window.window().hide().map_err(|error| error.to_string())?;
         tauri::async_runtime::spawn_blocking(|| {
@@ -401,6 +563,46 @@ pub(crate) async fn plugin_clipboard_write_history(
         })
         .await
         .map_err(|error| format!("插件粘贴任务异常结束：{error}"))??;
+    }
+    Ok(true)
+}
+
+/**
+ * 复制原版插件多选合并后的文件列表，并可粘贴到原前台应用。
+ * @param paths 要放到系统文件剪贴板的绝对路径。
+ * @param should_paste 是否自动发送粘贴组合键。
+ * @param window 发起请求的插件 Webview。
+ * @param runtime 插件身份注册表。
+ * @returns 写入成功标记。
+ */
+#[tauri::command]
+pub(crate) async fn plugin_clipboard_write_files(
+    paths: Vec<String>,
+    should_paste: bool,
+    window: Webview,
+    runtime: State<'_, PluginRuntime>,
+) -> Result<bool, String> {
+    runtime.plugin_for_window(window.label())?;
+    if paths.is_empty() || paths.len() > 100 || paths.iter().any(|path| path.len() > 4096) {
+        return Err("文件剪贴板路径数量或长度超出范围".to_owned());
+    }
+    let paths = paths.into_iter().map(PathBuf::from).collect::<Vec<_>>();
+    if paths
+        .iter()
+        .any(|path| !path.is_absolute() || !path.exists())
+    {
+        return Err("文件剪贴板包含不存在或非绝对路径".to_owned());
+    }
+    // 剪贴板只保存文件引用，不复制文件内容；粘贴目标由操作系统决定。
+    desktop::write_clipboard_files(&paths)?;
+    if should_paste {
+        window.window().hide().map_err(|error| error.to_string())?;
+        tauri::async_runtime::spawn_blocking(|| {
+            std::thread::sleep(std::time::Duration::from_millis(120));
+            desktop::simulate_paste()
+        })
+        .await
+        .map_err(|error| format!("文件粘贴任务异常结束：{error}"))??;
     }
     Ok(true)
 }
@@ -470,6 +672,78 @@ pub(crate) fn plugin_out(
         window.window().close().map_err(|error| error.to_string())?;
     }
     Ok(())
+}
+
+/**
+ * 把主搜索框输入转交给当前内嵌插件注册的子输入回调。
+ * @param plugin_name 正在运行的插件名称。
+ * @param value 搜索框当前文本。
+ * @param window 发起请求的主 Webview。
+ * @param app 桌面应用句柄。
+ * @returns 输入保存完成或视图不存在错误。
+ */
+#[tauri::command]
+pub(crate) fn plugin_set_sub_input(
+    plugin_name: String,
+    value: String,
+    window: Webview,
+    app: AppHandle,
+) -> Result<(), String> {
+    if window.label() != "main" || value.chars().count() > 500 {
+        return Err("插件子输入请求无效".to_owned());
+    }
+    plugin::validate_plugin_name(&plugin_name)?;
+    let label = format!("plugin-{plugin_name}");
+    let webview = app
+        .get_webview(&label)
+        .ok_or_else(|| "插件页面不存在".to_owned())?;
+    if webview.window().label() != "main" {
+        return Err("插件没有内嵌在主窗口".to_owned());
+    }
+    // 仅保存查询；内嵌 Webview 自行轮询，避开 GTK 跨 Webview 派发时的层级异常。
+    *CLIPBOARD_SUB_INPUT
+        .lock()
+        .map_err(|error| error.to_string())? = value;
+    Ok(())
+}
+
+/**
+ * 供原版剪贴板视图读取宿主搜索框的最新输入。
+ * @param window 发起请求的插件 Webview。
+ * @returns 当前搜索词，或未授权视图错误。
+ */
+#[tauri::command]
+pub(crate) fn plugin_get_sub_input(window: Webview) -> Result<String, String> {
+    if window.label() != "plugin-clipboard" {
+        return Err("只有剪贴板插件可以读取子输入".to_owned());
+    }
+    CLIPBOARD_SUB_INPUT
+        .lock()
+        .map(|value| value.clone())
+        .map_err(|error| error.to_string())
+}
+
+/**
+ * 让原版插件将键盘焦点放回主窗口的搜索框。
+ * @param window 发起请求的插件 Webview。
+ * @param runtime 插件身份注册表。
+ * @param app 桌面应用句柄。
+ * @returns 聚焦请求派发结果。
+ */
+#[tauri::command]
+pub(crate) fn plugin_focus_sub_input(
+    window: Webview,
+    runtime: State<'_, PluginRuntime>,
+    app: AppHandle,
+) -> Result<(), String> {
+    runtime.plugin_for_window(window.label())?;
+    if window.window().label() != "main" {
+        return Ok(());
+    }
+    app.get_webview("main")
+        .ok_or_else(|| "主窗口不存在".to_owned())?
+        .eval("document.querySelector('.search-field input')?.focus()")
+        .map_err(|error| error.to_string())
 }
 
 /**

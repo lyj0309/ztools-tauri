@@ -45,5 +45,6 @@ commands.allow = [
   "detach_embedded_plugin",
   "reveal_plugin_directory",
   "get_installed_plugin_detail",
-  "list_running_plugins"
+  "list_running_plugins",
+  "plugin_set_sub_input"
 ]

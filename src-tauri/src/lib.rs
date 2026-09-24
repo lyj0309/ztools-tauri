@@ -85,6 +85,7 @@ pub fn run() {
             ocr::plugin_ocr,
             ocr::plugin_ocr_copy_text,
             screenshot::screenshot_editor_source,
+            screenshot::screenshot_editor_select,
             screenshot::screenshot_editor_info,
             screenshot::screenshot_editor_ready,
             screenshot::screenshot_save,
@@ -130,6 +131,10 @@ pub fn run() {
             commands::plugin::plugin_clipboard_delete,
             commands::plugin::plugin_clipboard_clear,
             commands::plugin::plugin_clipboard_write_history,
+            commands::plugin::plugin_clipboard_write_files,
+            commands::plugin::plugin_set_sub_input,
+            commands::plugin::plugin_get_sub_input,
+            commands::plugin::plugin_focus_sub_input,
             commands::plugin::plugin_show_notification,
             commands::plugin::plugin_out,
             commands::plugin::plugin_hide_main_window,
@@ -312,7 +317,7 @@ fn launch_e2e_plugin(app: &tauri::AppHandle) -> Result<(), Box<dyn std::error::E
             let result = if feature_code == "pin" {
                 screenshot::start_history(screenshot_app, main).await
             } else {
-                screenshot::start_editor(screenshot_app, main).await
+                screenshot::start_editor(screenshot_app, main, "capture").await
             };
             match result {
                 Ok(()) => eprintln!("[e2e] screenshot plugin launch completed"),

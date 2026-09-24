@@ -53,6 +53,8 @@ let activeTool = 'select';
 let activeColor = '#ff3b30';
 let busy = false;
 let pendingTextPoint = null;
+let enteringOriginalEditor = false;
+const launchMode = new URLSearchParams(window.location.search).get('mode') || 'capture';
 /**
  * 把 Tauri 原始响应统一转换为字节数组。
  * @param value IPC 返回的 ArrayBuffer 或数字数组。
@@ -362,6 +364,11 @@ function handlePointerUp(event) {
     draft = null;
     redraw();
     positionControls();
+    // 原版截图在选区确定后进入独立标注画面，不需要再点一次“编辑”。
+    if (activeTool === 'select' && selection && !enteringOriginalEditor) {
+        if (launchMode === 'copy' || launchMode === 'save') void exportSelection(launchMode);
+        else void openOriginalEditor();
+    }
 }
 /**
  * 把当前选区和标注渲染成独立 PNG。
@@ -392,6 +399,27 @@ async function renderSelection() {
         width: output.width,
         height: output.height
     };
+}
+
+/**
+ * 将选区交给原版截图标注界面，保留原生截图窗口与 OCR、贴图能力。
+ * @returns 原版编辑页加载完成后的 Promise。
+ */
+async function openOriginalEditor() {
+    if (enteringOriginalEditor) return;
+    enteringOriginalEditor = true;
+    try {
+        const rendered = await renderSelection();
+        // 大图通过二进制 IPC 留在 Rust 临时文件；浏览器只保存小型选区坐标。
+        await invoke('screenshot_editor_select', rendered.bytes);
+        sessionStorage.setItem('ztools-original-selection', JSON.stringify({
+            x: rendered.x, y: rendered.y, width: rendered.width, height: rendered.height
+        }));
+        window.location.replace('editor.html#/editor?key=current');
+    } catch (error) {
+        enteringOriginalEditor = false;
+        showMessage(`无法打开截图标注：${String(error)}`, true);
+    }
 }
 /**
  * 显示短暂状态或错误信息。

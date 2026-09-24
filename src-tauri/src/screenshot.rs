@@ -12,8 +12,8 @@ use std::{
 use serde::Serialize;
 use tauri::{
     ipc::{InvokeBody, Request, Response},
-    AppHandle, Emitter, Manager, PhysicalPosition, PhysicalSize, WebviewUrl, WebviewWindow,
-    WebviewWindowBuilder, Window, WindowEvent,
+    AppHandle, Emitter, LogicalSize, Manager, PhysicalPosition, PhysicalSize, WebviewUrl,
+    WebviewWindow, WebviewWindowBuilder, Window, WindowEvent,
 };
 
 use crate::desktop;
@@ -119,11 +119,15 @@ pub(crate) struct ScreenshotEditorInfo {
  * 无过渡隐藏启动器，截取固定显示器并打开选区编辑器。
  * @param app 桌面宿主句柄。
  * @param main 发起截图的启动器窗口。
+ * @param mode 原版截图命令的普通、立即复制或立即保存模式。
  * @returns 编辑器创建结果，抓屏失败时恢复启动器。
  */
-pub(crate) async fn start_editor(app: AppHandle, main: Window) -> Result<(), String> {
+pub(crate) async fn start_editor(app: AppHandle, main: Window, mode: &str) -> Result<(), String> {
     if main.label() != "main" {
         return Err("只有主启动器可以发起截图".to_owned());
+    }
+    if !matches!(mode, "capture" | "copy" | "save") {
+        return Err("未知的截图模式".to_owned());
     }
     if let Some(existing) = app.get_webview_window(EDITOR_LABEL) {
         let _ = existing.close();
@@ -160,18 +164,22 @@ pub(crate) async fn start_editor(app: AppHandle, main: Window) -> Result<(), Str
     }
     runtime.replace_editor_source(source)?;
 
-    let build_result = WebviewWindowBuilder::new(&app, EDITOR_LABEL, plugin_url("index.html")?)
-        .title("ZTools 截图")
-        .decorations(false)
-        .resizable(false)
-        .always_on_top(true)
-        .skip_taskbar(true)
-        .visible(false)
-        .inner_size(
-            f64::from(monitor_size.width),
-            f64::from(monitor_size.height),
-        )
-        .build();
+    let build_result = WebviewWindowBuilder::new(
+        &app,
+        EDITOR_LABEL,
+        plugin_url(&format!("index.html?mode={mode}"))?,
+    )
+    .title("ZTools 截图")
+    .decorations(false)
+    .resizable(false)
+    .always_on_top(true)
+    .skip_taskbar(true)
+    .visible(false)
+    .inner_size(
+        f64::from(monitor_size.width),
+        f64::from(monitor_size.height),
+    )
+    .build();
     let editor = match build_result {
         Ok(window) => window,
         Err(error) => {
@@ -218,6 +226,65 @@ pub(crate) fn screenshot_editor_source(
     read_png(&runtime.editor_source()?).map(Response::new)
 }
 
+/**
+ * 用用户选定的 PNG 替换临时源图，供原版截图标注界面继续编辑。
+ * @param request 原始 PNG 二进制请求。
+ * @param window 当前截图编辑器窗口。
+ * @param runtime 截图会话运行时。
+ * @returns 临时源图写入结果。
+ */
+#[tauri::command]
+pub(crate) fn screenshot_editor_select(
+    request: Request<'_>,
+    window: WebviewWindow,
+    runtime: tauri::State<'_, ScreenshotRuntime>,
+) -> Result<(), String> {
+    require_editor(&window)?;
+    let data = raw_png(&request)?;
+    validate_png(&data)?;
+    let image = decode_png(&data)?;
+    // 选区确定后不再需要全屏底图；复用会话临时文件避免把大图片放进 Web 存储。
+    fs::write(runtime.editor_source()?, data).map_err(|error| error.to_string())?;
+
+    // 原版标注器是围绕光标的紧凑窗口；在页面切换时隐藏全屏选区窗口并调整到同样的尺寸。
+    let monitor = window
+        .current_monitor()
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "无法定位截图显示器".to_owned())?;
+    let scale = window.scale_factor().map_err(|error| error.to_string())?;
+    let available_width = f64::from(monitor.size().width) / scale;
+    let available_height = f64::from(monitor.size().height) / scale;
+    let image_width = f64::from(image.width()) / scale;
+    let image_height = f64::from(image.height()) / scale;
+    let content_width_limit = (available_width - 80.0)
+        .min((image_height * 5.0).max(620.0))
+        .max(1.0);
+    let content_height_limit = (available_height - 140.0).max(1.0);
+    let view_scale = (content_width_limit / image_width)
+        .min(content_height_limit / image_height)
+        .min(1.0);
+    let width = (image_width * view_scale + 24.0)
+        .max(660.0)
+        .min(available_width);
+    let height = (image_height * view_scale + 82.0)
+        .max(260.0)
+        .min(available_height);
+    let cursor = window
+        .app_handle()
+        .cursor_position()
+        .map_err(|error| error.to_string())?;
+    let origin = monitor.position();
+    let max_x = origin.x + monitor.size().width as i32 - (width * scale).round() as i32;
+    let max_y = origin.y + monitor.size().height as i32 - (height * scale).round() as i32;
+    let x = (cursor.x as i32 - (width * scale / 2.0).round() as i32).clamp(origin.x, max_x);
+    let y = (cursor.y as i32 - (height * scale / 2.0).round() as i32).clamp(origin.y, max_y);
+    window.hide().map_err(|error| error.to_string())?;
+    window
+        .set_size(LogicalSize::new(width, height))
+        .and_then(|_| window.set_position(PhysicalPosition::new(x, y)))
+        .map_err(|error| error.to_string())
+}
+
 /// 返回当前编辑器源图尺寸，供前端校验画布映射。
 #[tauri::command]
 pub(crate) fn screenshot_editor_info(
@@ -243,7 +310,13 @@ pub(crate) fn screenshot_editor_ready(window: WebviewWindow) -> Result<(), Strin
         .map_err(|error| error.to_string())
 }
 
-/// 把编辑后的 PNG 保存到系统图片目录并关闭编辑器。
+/**
+ * 打开原版截图的保存对话框，把标注后的 PNG 写到用户指定位置。
+ * @param request 编辑器提交的原始 PNG。
+ * @param app 桌面宿主句柄。
+ * @param window 发起保存的截图窗口。
+ * @returns 保存后的路径；取消选择时返回空字符串。
+ */
 #[tauri::command]
 pub(crate) async fn screenshot_save(
     request: Request<'_>,
@@ -252,13 +325,34 @@ pub(crate) async fn screenshot_save(
 ) -> Result<String, String> {
     require_editor(&window)?;
     let data = raw_png(&request)?;
-    let save_app = app.clone();
-    let destination = tauri::async_runtime::spawn_blocking(move || {
-        // PNG 解码和磁盘写入不能占用窗口事件线程，否则高分屏选区会表现为应用卡死。
-        save_png_to_pictures(&save_app, &data)
-    })
-    .await
-    .map_err(|error| format!("截图保存任务异常结束：{error}"))??;
+    let pictures = app
+        .path()
+        .picture_dir()
+        .unwrap_or_else(|_| std::env::temp_dir());
+    let destination =
+        tauri::async_runtime::spawn_blocking(move || -> Result<Option<PathBuf>, String> {
+            // 原版保存操作由用户明确选路径；校验、对话框和磁盘写入全部留在阻塞线程。
+            validate_png(&data)?;
+            let timestamp = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|duration| duration.as_millis())
+                .unwrap_or_default();
+            let selected = rfd::FileDialog::new()
+                .set_title("保存截图")
+                .set_directory(&pictures)
+                .set_file_name(format!("ZTools-Screenshot-{timestamp}.png"))
+                .add_filter("PNG 图片", &["png"])
+                .save_file();
+            if let Some(path) = &selected {
+                fs::write(path, &data).map_err(|error| format!("无法保存截图：{error}"))?;
+            }
+            Ok(selected)
+        })
+        .await
+        .map_err(|error| format!("截图保存任务异常结束：{error}"))??;
+    let Some(destination) = destination else {
+        return Ok(String::new());
+    };
     finish_editor(
         &app,
         &window,

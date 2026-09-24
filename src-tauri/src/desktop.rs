@@ -137,6 +137,56 @@ pub(crate) fn write_clipboard_image_png(data: &[u8]) -> Result<(), String> {
         .map_err(|error| error.to_string())
 }
 
+/**
+ * 读取 Windows 文件剪贴板的 CF_HDROP 路径，其他平台暂不返回文件记录。
+ * @returns 当前文件路径列表；不存在该格式时返回 None。
+ */
+pub(crate) fn read_clipboard_files() -> Result<Option<Vec<PathBuf>>, String> {
+    #[cfg(target_os = "windows")]
+    {
+        use clipboard_win::{formats::FileList, Format};
+        if !FileList.is_format_avail() {
+            return Ok(None);
+        }
+        let paths: Vec<PathBuf> = clipboard_win::get_clipboard(FileList)
+            .map_err(|error| format!("读取文件剪贴板失败：{error}"))?;
+        return Ok((!paths.is_empty()).then_some(paths));
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        Ok(None)
+    }
+}
+
+/**
+ * 将已保存的 Windows 文件路径写回 CF_HDROP 文件剪贴板。
+ * @param paths 要复制的文件或目录路径。
+ * @returns 系统剪贴板写入结果。
+ */
+pub(crate) fn write_clipboard_files(paths: &[PathBuf]) -> Result<(), String> {
+    #[cfg(target_os = "windows")]
+    {
+        use clipboard_win::{formats::FileList, Setter};
+        if paths.is_empty() {
+            return Err("文件剪贴板不能为空".to_owned());
+        }
+        let strings = paths
+            .iter()
+            .map(|path| path.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        let _clipboard = clipboard_win::Clipboard::new_attempts(10)
+            .map_err(|error| format!("无法打开文件剪贴板：{error}"))?;
+        return FileList
+            .write_clipboard(strings.as_slice())
+            .map_err(|error| format!("写入文件剪贴板失败：{error}"));
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = paths;
+        Err("当前系统尚未提供文件剪贴板兼容层".to_owned())
+    }
+}
+
 /// 使用原生输入后端发送当前平台的粘贴组合键。
 pub(crate) fn simulate_paste() -> Result<(), String> {
     let mut enigo = Enigo::new(&Settings::default()).map_err(|error| error.to_string())?;

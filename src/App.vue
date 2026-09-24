@@ -41,6 +41,7 @@ import {
   runSystemCommand,
   sendTestNotification,
   setApplicationPinned,
+  setPluginSubInput,
   syncNow,
   stopPluginDevelopment,
   updateLocalShortcutAlias,
@@ -952,12 +953,16 @@ async function detachActivePlugin(): Promise<void> {
 }
 
 /**
- * 在顶栏输入新查询时退出当前插件页面。
+ * 在剪贴板插件工作区把查询发送给原版列表，其他页面仍回到启动器搜索。
  * @returns 无返回值。
  */
 function onSearchInput(): void {
   selectedIndex.value = 0
   if (settingsOpen.value && settingsSection.value === 'plugins') pluginSearch.value = query.value
+  if (activePlugin.value?.name === 'clipboard') {
+    // 查询变化由下方响应式监听传给插件；这里仅保留原版内嵌工作区。
+    return
+  }
   if (activePlugin.value) void closeActivePlugin()
 }
 
@@ -1441,6 +1446,10 @@ async function registerServiceEvents(): Promise<void> {
       // 插件内容占用搜索框下方的工作区，宿主只保留顶栏和关闭入口。
       activePlugin.value = event.payload
       settingsOpen.value = false
+      if (event.payload.name === 'clipboard') query.value = ''
+      if (event.payload.name === 'clipboard') {
+        void setPluginSubInput('clipboard', '').catch((error) => { errorMessage.value = String(error) })
+      }
       if (!runningPluginNames.value.includes(event.payload.name)) {
         runningPluginNames.value = [...runningPluginNames.value, event.payload.name]
       }
@@ -1653,12 +1662,21 @@ watch(
     () => droppedPaths.value.length
   ],
   () => {
+    // 插件工作区已由 Rust 固定为 800×600；输入搜索词时重复 GTK resize 会把子 Webview 挤走。
+    if (activePlugin.value) return
     void resizeLauncherWindow()
   },
   { flush: 'post' }
 )
 
 watch(settingsDraft, scheduleSettingsSave, { deep: true, flush: 'sync' })
+watch(query, (value) => {
+  if (activePlugin.value?.name !== 'clipboard') return
+  // 输入、清空和程序设置查询均同步到原版剪贴板的子输入接口。
+  void setPluginSubInput('clipboard', value).catch((error) => {
+    errorMessage.value = String(error)
+  })
+})
 
 onMounted(() => {
   // 首帧先恢复原版单行启动器尺寸，再异步加载内容。
@@ -1999,7 +2017,7 @@ onUnmounted(() => {
         <section v-else-if="settingsSection === 'data'" class="settings-body">
           <h3 class="settings-section-title">我的数据</h3>
           <label class="switch-row">
-            <span><strong>持续记录剪贴板</strong><small>Rust 后台仅保存纯文本，最多 2 MB</small></span>
+            <span><strong>持续记录剪贴板</strong><small>本地保存文本和图片历史；文本最多 2 MB</small></span>
             <input v-model="settingsDraft.clipboardMonitoring" type="checkbox" />
           </label>
           <label class="switch-row">

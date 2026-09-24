@@ -30,6 +30,64 @@ type BundledPluginFile = (&'static str, &'static [u8]);
 type BundledPlugin = (&'static str, &'static [BundledPluginFile]);
 const BUNDLED_PLUGIN_FILES: &[BundledPlugin] = &[
     (
+        "clipboard",
+        &[
+            (
+                "plugin.json",
+                include_bytes!("../resources/default-plugins/clipboard/plugin.json"),
+            ),
+            (
+                "index.html",
+                include_bytes!("../resources/default-plugins/clipboard/index.html"),
+            ),
+            (
+                "preload.js",
+                include_bytes!("../resources/default-plugins/clipboard/preload.js"),
+            ),
+            (
+                "logo.png",
+                include_bytes!("../resources/default-plugins/clipboard/logo.png"),
+            ),
+            (
+                "README.md",
+                include_bytes!("../resources/default-plugins/clipboard/README.md"),
+            ),
+            (
+                "LICENSE.upstream",
+                include_bytes!("../resources/default-plugins/clipboard/LICENSE.upstream"),
+            ),
+            (
+                "assets/index-CgQaXsPA.css",
+                include_bytes!("../resources/default-plugins/clipboard/assets/index-CgQaXsPA.css"),
+            ),
+            (
+                "assets/index-D6-6Wwwu.js",
+                include_bytes!("../resources/default-plugins/clipboard/assets/index-D6-6Wwwu.js"),
+            ),
+        ],
+    ),
+    (
+        "translation-wy",
+        &[
+            (
+                "plugin.json",
+                include_bytes!("../resources/default-plugins/translation-wy/plugin.json"),
+            ),
+            (
+                "index.html",
+                include_bytes!("../resources/default-plugins/translation-wy/index.html"),
+            ),
+            (
+                "logo.png",
+                include_bytes!("../resources/default-plugins/translation-wy/logo.png"),
+            ),
+            (
+                "LICENSE.upstream",
+                include_bytes!("../resources/default-plugins/translation-wy/LICENSE.upstream"),
+            ),
+        ],
+    ),
+    (
         "break-reminder",
         &[
             (
@@ -97,8 +155,40 @@ const BUNDLED_PLUGIN_FILES: &[BundledPlugin] = &[
                 include_bytes!("../resources/default-plugins/screenshot/plugin.json"),
             ),
             (
+                "logo.png",
+                include_bytes!("../resources/default-plugins/screenshot/logo.png"),
+            ),
+            (
                 "index.html",
                 include_bytes!("../resources/default-plugins/screenshot/index.html"),
+            ),
+            (
+                "editor.html",
+                include_bytes!("../resources/default-plugins/screenshot/editor.html"),
+            ),
+            (
+                "editor-adapter.js",
+                include_bytes!("../resources/default-plugins/screenshot/editor-adapter.js"),
+            ),
+            (
+                "editor-adapter.css",
+                include_bytes!("../resources/default-plugins/screenshot/editor-adapter.css"),
+            ),
+            (
+                "assets/index-CRZJr_0k.js",
+                include_bytes!("../resources/default-plugins/screenshot/assets/index-CRZJr_0k.js"),
+            ),
+            (
+                "assets/index-NfvmJyAk.css",
+                include_bytes!("../resources/default-plugins/screenshot/assets/index-NfvmJyAk.css"),
+            ),
+            (
+                "LICENSE.upstream",
+                include_bytes!("../resources/default-plugins/screenshot/LICENSE.upstream"),
+            ),
+            (
+                "README.upstream.md",
+                include_bytes!("../resources/default-plugins/screenshot/README.upstream.md"),
             ),
             (
                 "screenshot.js",
@@ -1123,6 +1213,9 @@ pub(crate) fn launch_plugin(
     if plugin_name == "baidu-translate" {
         return launch_baidu_site(app, runtime, &manifest, &action);
     }
+    if plugin_name == "translation-wy" {
+        return launch_youdao_site(app, runtime, &manifest, &action);
+    }
     let preload_adapter = preload_adapter_script(&manifest, &plugin_directory)?;
     let label = plugin_window_label(plugin_name);
     let action_json = serde_json::to_string(&action).map_err(|error| error.to_string())?;
@@ -1489,7 +1582,7 @@ fn arrange_linux_embedded_views(main: &tauri::Window) -> Result<(), String> {
         fixed.set_size_request(800, 600);
         if had_fixed {
             if let Some(primary) = fixed.children().first() {
-                primary.set_size_request(800, 600);
+                primary.set_size_request(800, 61);
             }
         }
         let children = box_layout
@@ -1500,7 +1593,7 @@ fn arrange_linux_embedded_views(main: &tauri::Window) -> Result<(), String> {
         for (index, widget) in children.into_iter().enumerate() {
             let is_main = !had_fixed && index == 0;
             box_layout.remove(&widget);
-            widget.set_size_request(800, if is_main { 600 } else { 539 });
+            widget.set_size_request(800, if is_main { 61 } else { 539 });
             fixed.put(&widget, 0, if is_main { 0 } else { 61 });
             if is_main {
                 widget.show();
@@ -1628,6 +1721,105 @@ fn launch_baidu_site(
         Err(error) => {
             runtime.unregister_instance(&label);
             return Err(format!("无法在主窗口加载百度翻译：{error}"));
+        }
+    };
+    if let Err(error) = show_embedded_plugin(app, &webview, &manifest.title) {
+        let _ = webview.close();
+        runtime.unregister_instance(&label);
+        return Err(error);
+    }
+    Ok(())
+}
+
+/**
+ * 把选中的文字填入有道网页的原版输入框，并在页面延迟渲染时重试。
+ * @param action 插件启动动作及选中文字。
+ * @returns 可注入官网 Webview 的脚本。
+ */
+fn youdao_input_script(action: &PluginEnterAction) -> Result<String, String> {
+    let payload = action.payload.as_str().unwrap_or_default();
+    let quoted = serde_json::to_string(payload).map_err(|error| error.to_string())?;
+    Ok(format!(
+        r#"(() => {{
+  const text = {quoted};
+  if (!text) return;
+  let attempts = 0;
+  const timer = setInterval(() => {{
+    const candidates = document.querySelectorAll('#js_fanyi_input, textarea, [contenteditable="true"]');
+    const input = [...candidates].find((element) => {{
+      const box = element.getBoundingClientRect();
+      return box.width > 120 && box.height > 20 && box.left > 150 && box.top > 150
+        && getComputedStyle(element).visibility !== 'hidden';
+    }});
+    // 官网页面异步装载较慢；只给可见的翻译输入区填值，避免过早命中隐藏编辑器。
+    if (!input && ++attempts < 300) return;
+    clearInterval(timer);
+    if (!input) return;
+    input.focus();
+    if (input instanceof HTMLTextAreaElement || input instanceof HTMLInputElement) {{
+      const setter = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(input), 'value')?.set;
+      setter?.call(input, text);
+    }} else {{
+      input.textContent = text;
+    }}
+    input.dispatchEvent(new InputEvent('input', {{ bubbles: true, data: text, inputType: 'insertText' }}));
+  }}, 200);
+}})();"#
+    ))
+}
+
+/**
+ * 在主窗口搜索框下方打开有道官网，保留原版网页翻译界面。
+ * @param app 桌面应用句柄。
+ * @param runtime 插件运行时与隔离数据目录。
+ * @param manifest 内置有道翻译插件声明。
+ * @param action 本次进入的功能与选中文字。
+ * @returns 网页显示结果。
+ */
+fn launch_youdao_site(
+    app: &AppHandle,
+    runtime: &PluginRuntime,
+    manifest: &PluginManifest,
+    action: &PluginEnterAction,
+) -> Result<(), String> {
+    if action.code != "fanyi" {
+        return Err("未知的有道翻译功能".to_owned());
+    }
+    let url = tauri::Url::parse("https://fanyi.youdao.com/#/TextTranslate")
+        .map_err(|error| error.to_string())?;
+    let label = plugin_window_label(&manifest.name);
+    let input_script = youdao_input_script(action)?;
+    // 复用内嵌或分离视图，避免重复建立网站会话。
+    if let Some(webview) = app.get_webview(&label) {
+        webview
+            .eval(&input_script)
+            .map_err(|error| error.to_string())?;
+        if webview.window().label() == "main" {
+            return show_embedded_plugin(app, &webview, &manifest.title);
+        }
+        let detached = webview.window();
+        detached.show().map_err(|error| error.to_string())?;
+        detached.set_focus().map_err(|error| error.to_string())?;
+        return Ok(());
+    }
+    let data_directory = runtime.root().join(".webview-data").join(&manifest.name);
+    fs::create_dir_all(&data_directory).map_err(|error| error.to_string())?;
+    runtime.register_instance(&label, &manifest.name)?;
+    let main = app
+        .get_window("main")
+        .ok_or_else(|| "主启动器窗口不存在".to_owned())?;
+    let builder = tauri::webview::WebviewBuilder::new(&label, WebviewUrl::External(url))
+        .data_directory(data_directory)
+        .initialization_script(input_script);
+    let webview = match main.add_child(
+        builder,
+        LogicalPosition::new(0.0, 61.0),
+        LogicalSize::new(800.0, 539.0),
+    ) {
+        Ok(webview) => webview,
+        Err(error) => {
+            runtime.unregister_instance(&label);
+            return Err(format!("无法在主窗口加载有道翻译：{error}"));
         }
     };
     if let Err(error) = show_embedded_plugin(app, &webview, &manifest.title) {
@@ -1825,13 +2017,21 @@ fn plugin_summary(manifest: &PluginManifest, directory: &Path) -> InstalledPlugi
     }
 }
 
-/// 仅在内容变化时写入内嵌插件文件，减少每次启动产生的无意义磁盘修改。
+/**
+ * 仅在内容变化时原子发布内置插件文件，并创建资源子目录。
+ * @param path 插件目录中的目标文件。
+ * @param contents 编译进宿主的目标字节。
+ * @returns 写入或跳过后的结果。
+ */
 fn write_bundled_file(path: &Path, contents: &[u8]) -> Result<(), String> {
     if fs::read(path).is_ok_and(|current| current == contents) {
         return Ok(());
     }
 
     // 先写同目录临时文件，完整落盘后再发布，避免留下半写入的插件入口。
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|error| format!("无法创建内置插件资源目录：{error}"))?;
+    }
     let temporary = path.with_extension(format!(
         "{}.bundled-tmp",
         path.extension()
@@ -2330,14 +2530,18 @@ fn compatibility_script(
   let clipboardPollTimer = null;
   const clipboard = Object.freeze({{
     writeContent: async (data, shouldPaste = false) => {{
+      if (data?.type === 'image' && /^image-\d+$/.test(String(data.content ?? '')))
+        return invoke('plugin_clipboard_write_history', {{ id: String(data.content), shouldPaste: Boolean(shouldPaste) }});
+      if (data?.type === 'file' && Array.isArray(data.content))
+        return invoke('plugin_clipboard_write_files', {{ paths: data.content.map(String), shouldPaste: Boolean(shouldPaste) }});
       if (!data || data.type !== 'text' || typeof data.content !== 'string')
-        throw new Error('当前核心版 clipboard.writeContent 仅支持文本');
-      await enqueue('plugin_copy_text', {{ content: data.content, shouldPaste }});
+        throw new Error('当前版本 clipboard.writeContent 支持历史图片和文本');
+      await enqueue('plugin_copy_text', {{ content: data.content, shouldPaste: Boolean(shouldPaste) }});
       return true;
     }},
     write: async (content, shouldPaste = false) => {{
-      if ((typeof content === 'number' && Number.isInteger(content)) || (typeof content === 'string' && /^\d+$/.test(content))) {{
-        return invoke('plugin_clipboard_write_history', {{ id: Number(content), shouldPaste: Boolean(shouldPaste) }});
+      if ((typeof content === 'number' && Number.isInteger(content)) || (typeof content === 'string' && /^(?:(?:image|files)-)?\d+$/.test(content))) {{
+        return invoke('plugin_clipboard_write_history', {{ id: String(content), shouldPaste: Boolean(shouldPaste) }});
       }}
       const text = typeof content === 'string' ? content : content?.content;
       if (typeof text !== 'string') throw new Error('clipboard.write 需要文本内容');
@@ -2346,16 +2550,16 @@ fn compatibility_script(
     }},
     getHistory: async (page = 1, pageSize = 50, kind) => invoke('plugin_clipboard_get_history', {{ page, pageSize, kind }}),
     search: async (query) => invoke('plugin_clipboard_search', {{ query: String(query ?? '') }}),
-    delete: async (id) => invoke('plugin_clipboard_delete', {{ id: Number(id) }}),
+    delete: async (id) => invoke('plugin_clipboard_delete', {{ id: String(id) }}),
     clear: async () => invoke('plugin_clipboard_clear'),
     onChange: (callback) => {{
       if (typeof callback !== 'function') throw new TypeError('clipboard.onChange 需要回调函数');
-      let lastId = null;
+      let lastId;
       if (clipboardPollTimer) clearInterval(clipboardPollTimer);
       const check = async () => {{
         const page = await invoke('plugin_clipboard_get_history', {{ page: 1, pageSize: 1 }});
         const nextId = page.items[0]?.id ?? null;
-        if (lastId !== null && nextId !== lastId) callback(page.items[0] ?? null);
+        if (lastId !== undefined && nextId !== lastId) callback(page.items[0] ?? null);
         lastId = nextId;
       }};
       void check();
@@ -2399,12 +2603,55 @@ fn compatibility_script(
   }});
   let subInputHandler = null;
   let subInputValue = '';
+  const filterClipboardDom = () => {{
+    if (pluginName !== 'clipboard') return;
+    const needle = subInputValue.trim().toLocaleLowerCase();
+    let visible = 0;
+    document.querySelectorAll('.clipboard-item').forEach((item) => {{
+      const matches = !needle || item.textContent.toLocaleLowerCase().includes(needle);
+      if (matches) visible += 1;
+      if (matches) item.style.removeProperty('display');
+      else item.style.setProperty('display', 'none', 'important');
+    }});
+    const empty = document.querySelector('[data-ztools-clipboard-search-empty]');
+    if ((!needle || visible > 0) && empty) empty.remove();
+    if (needle && visible === 0 && !empty && document.querySelector('.clipboard-app')) {{
+      const hint = document.createElement('div');
+      hint.dataset.ztoolsClipboardSearchEmpty = '';
+      hint.textContent = '没有匹配的剪贴板记录';
+      hint.style.cssText = 'padding:36px 16px;text-align:center;color:#999;font-size:13px';
+      document.querySelector('.clipboard-app').append(hint);
+    }}
+  }};
+  if (pluginName === 'clipboard') {{
+    window.addEventListener('DOMContentLoaded', () => {{
+      new MutationObserver(() => requestAnimationFrame(filterClipboardDom))
+        .observe(document.body, {{ childList: true, subtree: true }});
+    }}, {{ once: true }});
+  }}
   const setSubInput = async (callback) => {{ subInputHandler = typeof callback === 'function' ? callback : null; return true; }};
   const setSubInputValue = (value) => {{
     subInputValue = String(value ?? '');
-    subInputHandler?.({{ text: subInputValue }});
+    if (pluginName === 'clipboard') requestAnimationFrame(filterClipboardDom);
+    else subInputHandler?.({{ text: subInputValue }});
     return true;
   }};
+  Object.defineProperty(window, '__ztoolsSubInputFromHost', {{
+    value: (value) => {{
+      subInputValue = String(value ?? '');
+      if (pluginName === 'clipboard') requestAnimationFrame(filterClipboardDom);
+      else setTimeout(() => subInputHandler?.({{ text: subInputValue }}), 0);
+    }},
+    configurable: false
+  }});
+  if (pluginName === 'clipboard') {{
+    window.addEventListener('DOMContentLoaded', () => {{
+      // 主视图与插件视图分开读取同一搜索状态，避免 GTK 在输入回调中调整子视图层级。
+      setInterval(() => void invoke('plugin_get_sub_input').then((value) => {{
+        if (value !== subInputValue) window.__ztoolsSubInputFromHost(value);
+      }}).catch((error) => console.error('[ztools:sub-input]', error)), 180);
+    }}, {{ once: true }});
+  }}
   const api = Object.freeze({{
     getAppName: () => 'ZTools',
     getAppVersion: () => appVersion,
@@ -2431,7 +2678,7 @@ fn compatibility_script(
     showToast: async (message) => invoke('plugin_show_notification', {{ body: String(message ?? '') }}),
     setSubInput,
     setSubInputValue,
-    subInputFocus: () => {{ globalThis.focus(); return true; }},
+    subInputFocus: () => {{ void invoke('plugin_focus_sub_input'); return true; }},
     registerTool: () => false,
     copyText: (text) => {{
       enqueue('plugin_copy_text', {{ content: String(text ?? ''), shouldPaste: false }});

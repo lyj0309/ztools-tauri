@@ -334,6 +334,16 @@ export function launchPluginFeature(
 }
 
 /**
+ * 将主搜索框内容送到已内嵌插件的子输入回调。
+ * @param pluginName 正在运行的插件名称。
+ * @param value 当前搜索文本。
+ * @returns 输入传递完成后的 Promise。
+ */
+export function setPluginSubInput(pluginName: string, value: string): Promise<void> {
+  return invoke<void>('plugin_set_sub_input', { pluginName, value })
+}
+
+/**
  * 关闭主窗口中的插件页面并撤销它的 API 身份。
  * @param pluginName 要关闭的插件名称。
  * @returns 页面关闭后的 Promise。

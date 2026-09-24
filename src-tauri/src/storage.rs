@@ -1,9 +1,16 @@
-use std::{fs, path::Path, time::Duration};
+use std::{
+    fs,
+    path::{Path, PathBuf},
+    time::Duration,
+};
 
 use rusqlite::{backup::Backup, params, Connection};
 use serde::Serialize;
 
-use crate::models::{AppEntry, ClipboardEntry, HistoryEntry, LauncherSettings, LocalShortcut};
+use crate::models::{
+    AppEntry, ClipboardEntry, ClipboardFileItem, ClipboardFilesEntry, HistoryEntry,
+    LauncherSettings, LocalShortcut,
+};
 use crate::sync::SyncDocument;
 
 const CLIPBOARD_IMAGE_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS clipboard_images (
@@ -13,6 +20,12 @@ const CLIPBOARD_IMAGE_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS clipboard_image
                    height INTEGER NOT NULL,
                    png BLOB NOT NULL,
                    thumbnail TEXT NOT NULL,
+                   captured_at INTEGER NOT NULL
+                 );";
+const CLIPBOARD_FILES_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS clipboard_files (
+                   id INTEGER PRIMARY KEY AUTOINCREMENT,
+                   content_hash TEXT NOT NULL UNIQUE,
+                   files_json TEXT NOT NULL,
                    captured_at INTEGER NOT NULL
                  );";
 
@@ -117,6 +130,9 @@ impl Store {
         connection
             .execute_batch(CLIPBOARD_IMAGE_SCHEMA)
             .map_err(|error| error.to_string())?;
+        connection
+            .execute_batch(CLIPBOARD_FILES_SCHEMA)
+            .map_err(|error| error.to_string())?;
         Ok(Self { connection })
     }
 
@@ -134,7 +150,7 @@ impl Store {
     }
 
     /**
-     * 恢复已校验的数据库，并补建旧版本缺少的图片历史表。
+     * 恢复已校验的数据库，并补建旧版本缺少的图片和文件历史表。
      * @param path 备份数据库路径。
      * @returns 恢复与兼容迁移结果。
      */
@@ -155,6 +171,9 @@ impl Store {
         drop(backup);
         self.connection
             .execute_batch(CLIPBOARD_IMAGE_SCHEMA)
+            .map_err(|error| error.to_string())?;
+        self.connection
+            .execute_batch(CLIPBOARD_FILES_SCHEMA)
             .map_err(|error| error.to_string())
     }
 
@@ -492,10 +511,114 @@ impl Store {
             .map_err(|e| format!("历史图片不存在或已清理：{e}"))
     }
 
+    /**
+     * 保存 Windows 文件剪贴板路径，按内容去重并限制记录数量。
+     * @param paths 系统文件剪贴板中的路径。
+     * @param timestamp 捕获时间戳。
+     * @returns 写入成功或数据库错误。
+     */
+    pub(crate) fn capture_clipboard_files(
+        &self,
+        paths: &[PathBuf],
+        timestamp: i64,
+    ) -> Result<(), String> {
+        if paths.is_empty() || paths.len() > 100 {
+            return Err("文件剪贴板路径数量无效".to_owned());
+        }
+        let files = paths
+            .iter()
+            .map(|path| ClipboardFileItem {
+                name: path
+                    .file_name()
+                    .map(|name| name.to_string_lossy().into_owned())
+                    .unwrap_or_default(),
+                path: path.to_string_lossy().into_owned(),
+                is_directory: path.is_dir(),
+                exists: path.exists(),
+            })
+            .collect::<Vec<_>>();
+        let json = serde_json::to_string(&files).map_err(|error| error.to_string())?;
+        if json.len() > 500_000 {
+            return Err("文件剪贴板路径总长度超过上限".to_owned());
+        }
+        let hash = stable_text_hash(&json);
+        self.connection
+            .execute(
+                "INSERT INTO clipboard_files(content_hash,files_json,captured_at) VALUES(?1,?2,?3)
+             ON CONFLICT(content_hash) DO UPDATE SET captured_at=excluded.captured_at",
+                params![hash, json, timestamp],
+            )
+            .map_err(|error| error.to_string())?;
+        // 与文字历史一样只保留最近记录，避免用户长期复制大批文件造成数据库膨胀。
+        self.connection
+            .execute(
+                "DELETE FROM clipboard_files WHERE id NOT IN (
+               SELECT id FROM clipboard_files ORDER BY captured_at DESC LIMIT 100
+             )",
+                [],
+            )
+            .map_err(|error| error.to_string())?;
+        self.touch_modified(timestamp)
+    }
+
+    /**
+     * 读取文件历史，并刷新每个文件当前是否还存在。
+     * @returns 最近文件历史或数据库错误。
+     */
+    pub(crate) fn clipboard_files(&self) -> Result<Vec<ClipboardFilesEntry>, String> {
+        let mut statement = self.connection.prepare(
+            "SELECT id,files_json,captured_at FROM clipboard_files ORDER BY captured_at DESC,id DESC LIMIT 100"
+        ).map_err(|error| error.to_string())?;
+        let rows = statement
+            .query_map([], |row| {
+                let json: String = row.get(1)?;
+                Ok((row.get::<_, i64>(0)?, json, row.get::<_, i64>(2)?))
+            })
+            .map_err(|error| error.to_string())?;
+        rows.map(|row| {
+            let (id, json, captured_at) = row.map_err(|error| error.to_string())?;
+            let mut files: Vec<ClipboardFileItem> =
+                serde_json::from_str(&json).map_err(|error| error.to_string())?;
+            for file in &mut files {
+                file.exists = Path::new(&file.path).exists();
+            }
+            Ok(ClipboardFilesEntry {
+                id,
+                files,
+                captured_at,
+            })
+        })
+        .collect()
+    }
+
+    /**
+     * 删除一条文件剪贴板历史并更新数据变更时间。
+     * @param id 文件历史的数据库标识。
+     * @returns 删除成功或数据库错误。
+     */
+    pub(crate) fn delete_clipboard_files(&self, id: i64) -> Result<(), String> {
+        self.connection
+            .execute("DELETE FROM clipboard_files WHERE id=?1", [id])
+            .map_err(|error| error.to_string())?;
+        self.touch_modified(now_millis())
+    }
+
     /// 删除单条剪贴板历史记录。
     pub(crate) fn delete_clipboard_entry(&self, id: i64) -> Result<(), String> {
         self.connection
             .execute("DELETE FROM clipboard_history WHERE id = ?1", [id])
+            .map_err(|error| error.to_string())?;
+        self.touch_modified(now_millis())
+    }
+
+    /**
+     * 删除一条图片剪贴板历史并更新数据变更时间。
+     * @param id 图片历史的数据库标识。
+     * @returns 删除成功或数据库错误。
+     */
+    pub(crate) fn delete_clipboard_image(&self, id: i64) -> Result<(), String> {
+        self.connection
+            .execute("DELETE FROM clipboard_images WHERE id = ?1", [id])
             .map_err(|error| error.to_string())?;
         self.touch_modified(now_millis())
     }
@@ -507,7 +630,7 @@ impl Store {
     pub(crate) fn clear_clipboard_history(&self) -> Result<(), String> {
         // 图片和文本使用同一清理入口，避免用户清空历史后图片仍被保留。
         self.connection
-            .execute_batch("DELETE FROM clipboard_history; DELETE FROM clipboard_images;")
+            .execute_batch("DELETE FROM clipboard_history; DELETE FROM clipboard_images; DELETE FROM clipboard_files;")
             .map_err(|error| error.to_string())?;
         self.touch_modified(now_millis())
     }
@@ -799,7 +922,7 @@ impl Store {
     }
 
     /**
-     * 按同一保留期限清理文本和图片历史。
+     * 按同一保留期限清理文本、图片和文件历史。
      * @param retention_days 保留天数。
      * @param now 当前时间戳。
      * @returns 删除记录总数或数据库错误。
@@ -820,7 +943,14 @@ impl Store {
                 [cutoff],
             )
             .map_err(|error| error.to_string())?;
-        Ok(changed + images)
+        let files = self
+            .connection
+            .execute(
+                "DELETE FROM clipboard_files WHERE captured_at < ?1",
+                [cutoff],
+            )
+            .map_err(|error| error.to_string())?;
+        Ok(changed + images + files)
     }
 
     /// 返回按用户位置排序的收藏应用标识。

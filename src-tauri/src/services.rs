@@ -85,7 +85,7 @@ impl Drop for BackgroundServices {
 }
 
 /**
- * 监控文本及图片剪贴板，在内容变化时保存历史。
+ * 监控文本、图片和 Windows 文件剪贴板，在内容变化时保存历史。
  * @param app 桌面宿主句柄。
  * @param stop 退出信号。
  * @returns 后台监控线程句柄。
@@ -95,6 +95,7 @@ fn start_clipboard_monitor(app: AppHandle, stop: Arc<AtomicBool>) -> JoinHandle<
         .name("ztools-clipboard-monitor".to_owned())
         .spawn(move || {
             let mut last_content = String::new();
+            let mut last_files = Vec::new();
             while !stop.load(Ordering::Acquire) {
                 let state = app.state::<AppState>();
                 let settings = state
@@ -108,6 +109,7 @@ fn start_clipboard_monitor(app: AppHandle, stop: Arc<AtomicBool>) -> JoinHandle<
                 {
                     let _ = crate::clipboard_images::capture_current(&app);
                     last_content.clear();
+                    last_files.clear();
                     sleep_interruptibly(&stop, Duration::from_millis(700));
                     continue;
                 }
@@ -136,6 +138,30 @@ fn start_clipboard_monitor(app: AppHandle, stop: Arc<AtomicBool>) -> JoinHandle<
                 }
                 // 原图编码运行在后台线程，图片历史通过独立选择页按需读取。
                 let _ = crate::clipboard_images::capture_current(&app);
+                // CF_HDROP 文件列表独立于文本和图片；复制文件夹时不读取文件内容。
+                match desktop::read_clipboard_files() {
+                    Ok(Some(paths)) if paths != last_files => {
+                        if let Ok(store) = state.store.lock() {
+                            let timestamp = current_timestamp().unwrap_or_default();
+                            let _ =
+                                store
+                                    .capture_clipboard_files(&paths, timestamp)
+                                    .and_then(|_| {
+                                        store
+                                            .prune_clipboard(
+                                                settings.as_ref().map_or(180, |value| {
+                                                    value.clipboard_retention_days
+                                                }),
+                                                timestamp,
+                                            )
+                                            .map(|_| ())
+                                    });
+                        }
+                        last_files = paths;
+                    }
+                    Ok(None) => last_files.clear(),
+                    _ => {}
+                }
                 sleep_interruptibly(&stop, Duration::from_millis(700));
             }
         })
