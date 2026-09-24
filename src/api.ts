@@ -343,6 +343,15 @@ export function closeEmbeddedPlugin(pluginName: string): Promise<void> {
 }
 
 /**
+ * 将主窗口内嵌插件的原 Webview 移进独立窗口。
+ * @param pluginName 要分离的插件名称。
+ * @returns 页面分离完成后的 Promise。
+ */
+export function detachEmbeddedPlugin(pluginName: string): Promise<void> {
+  return invoke<void>('detach_embedded_plugin', { pluginName })
+}
+
+/**
  * 按当前搜索或插件工作区高度调整主窗口。
  * @param height 61 到 600 像素的目标高度。
  * @returns 尺寸调整完成后的 Promise。

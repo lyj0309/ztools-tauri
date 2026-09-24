@@ -15,8 +15,8 @@ use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tauri::{
-    http, AppHandle, Emitter, LogicalPosition, LogicalSize, Manager, Monitor, WebviewUrl,
-    WebviewWindowBuilder, WindowEvent,
+    http, window::WindowBuilder, AppHandle, Emitter, LogicalPosition, LogicalSize, Manager,
+    Monitor, WebviewUrl, WebviewWindowBuilder, WindowEvent,
 };
 use walkdir::WalkDir;
 
@@ -1150,6 +1150,19 @@ pub(crate) fn launch_plugin(
                 show_embedded_plugin(app, &webview, &manifest.title)?;
                 return Ok(());
             }
+        } else if webview.window().label().starts_with("detached-") {
+            // 分离视图仍是同一个插件实例；再次启动时直接派发进入动作并聚焦它。
+            let payload_paths = plugin_payload_paths(&action.payload);
+            if !payload_paths.is_empty() {
+                runtime.grant_paths(&label, payload_paths)?;
+            }
+            webview
+                .eval(format!("window.__ztoolsDispatchEnter?.({action_json})"))
+                .map_err(|error| error.to_string())?;
+            let detached = webview.window();
+            detached.show().map_err(|error| error.to_string())?;
+            detached.set_focus().map_err(|error| error.to_string())?;
+            return Ok(());
         }
     }
 
@@ -1308,6 +1321,91 @@ pub(crate) fn launch_plugin(
         let _ = restore_main_window(app);
         return Err(format!("无法显示插件窗口：{error}"));
     }
+    Ok(())
+}
+
+/**
+ * 把主窗口内运行的插件 Webview 原位迁移到独立窗口，保留页面内存状态。
+ * @param app 桌面应用句柄。
+ * @param runtime 插件运行时与身份表。
+ * @param plugin_name 要分离的插件名称。
+ * @returns 独立窗口显示完成，失败时返回原因。
+ */
+pub(crate) fn detach_embedded_plugin(
+    app: &AppHandle,
+    runtime: &PluginRuntime,
+    plugin_name: &str,
+) -> Result<(), String> {
+    validate_plugin_name(plugin_name)?;
+    let label = plugin_window_label(plugin_name);
+    runtime.plugin_for_window(&label)?;
+    let webview = app
+        .get_webview(&label)
+        .ok_or_else(|| "插件页面不存在".to_owned())?;
+    if webview.window().label() != "main" {
+        return Err("插件已经在独立窗口中".to_owned());
+    }
+    let manifest = read_manifest(&runtime.root().join(plugin_name))?;
+    let detached_label = format!("detached-{plugin_name}");
+    if app.get_window(&detached_label).is_some() {
+        return Err("插件独立窗口已经存在".to_owned());
+    }
+
+    // 先建空宿主窗口，再迁移原有 Webview；失败时销毁空窗口，保留原插件页面。
+    let detached = WindowBuilder::new(app, &detached_label)
+        .title(&manifest.title)
+        .inner_size(800.0, 600.0)
+        .min_inner_size(420.0, 280.0)
+        .always_on_top(true)
+        .center()
+        .visible(false)
+        .build()
+        .map_err(|error| format!("无法创建插件独立窗口：{error}"))?;
+    let main = app
+        .get_window("main")
+        .ok_or_else(|| "主启动器窗口不存在".to_owned())?;
+    let transition = (|| -> Result<(), String> {
+        webview
+            .reparent(&detached)
+            .map_err(|error| format!("无法移动插件页面：{error}"))?;
+        // 分离窗口接管完整内容区；主窗口保留搜索栏并恢复普通结果布局。
+        webview
+            .set_position(LogicalPosition::new(0.0, 0.0))
+            .map_err(|error| error.to_string())?;
+        webview
+            .set_size(LogicalSize::new(800.0, 600.0))
+            .map_err(|error| error.to_string())?;
+        webview
+            .set_auto_resize(true)
+            .map_err(|error| error.to_string())?;
+        reset_embedded_layout(app)?;
+        detached.show().map_err(|error| error.to_string())?;
+        detached.set_focus().map_err(|error| error.to_string())?;
+        webview.set_focus().map_err(|error| error.to_string())?;
+        app.emit_to("main", "plugin-panel-closed", plugin_name)
+            .map_err(|error| error.to_string())
+    })();
+    if let Err(error) = transition {
+        // 任一步骤失败都把同一个页面放回搜索栏下方，避免留下不可见的插件窗口。
+        if webview.window().label() == detached_label {
+            let _ = webview.set_auto_resize(false);
+            let _ = webview.reparent(&main);
+            let _ = show_embedded_plugin(app, &webview, &manifest.title);
+        }
+        let _ = detached.close();
+        let _ = main.show();
+        return Err(error);
+    }
+    // 成功后才安装销毁回调，回滚空窗口时不能撤销仍在运行的插件身份。
+    detached.on_window_event({
+        let app = app.clone();
+        let label = label.clone();
+        move |event| {
+            if matches!(event, WindowEvent::Destroyed) {
+                app.state::<PluginRuntime>().unregister_instance(&label);
+            }
+        }
+    });
     Ok(())
 }
 
@@ -1503,6 +1601,13 @@ fn launch_baidu_site(
             // 在已有子 Webview 中切换文字或图片翻译，保留站点会话。
             webview.navigate(url).map_err(|error| error.to_string())?;
             return show_embedded_plugin(app, &webview, &manifest.title);
+        } else if webview.window().label().starts_with("detached-") {
+            // 已分离的官网视图继续复用同一页面与登录会话。
+            webview.navigate(url).map_err(|error| error.to_string())?;
+            let detached = webview.window();
+            detached.show().map_err(|error| error.to_string())?;
+            detached.set_focus().map_err(|error| error.to_string())?;
+            return Ok(());
         }
     }
     let data_directory = runtime.root().join(".webview-data").join(&manifest.name);
@@ -1567,6 +1672,13 @@ pub(crate) fn close_plugin_window(app: &AppHandle, plugin_name: &str) -> Result<
                 .map_err(|error| error.to_string())?;
             return Ok(());
         }
+        // 分离窗口使用不同于插件 Webview 的标签，须按真实父窗口关闭。
+        webview
+            .window()
+            .close()
+            .map_err(|error| error.to_string())?;
+        app.state::<PluginRuntime>().unregister_instance(&label);
+        return Ok(());
     }
     if let Some(window) = app.get_webview_window(&label) {
         window.close().map_err(|error| error.to_string())?;

@@ -226,6 +226,7 @@ jobs:
             pinVisible = $false
             breakSettingsVisible = $false
             breakSettingsEmbedded = $false
+            breakSettingsDetached = $false
             breakSkipClosedWindow = $false
           }
 
@@ -392,6 +393,22 @@ jobs:
               }
               $diagnostics.breakSettingsVisible = $true
               Save-DesktopScreenshot -Path 'artifacts/10-break-settings.png'
+              if ([version]$env:RELEASE_TAG.TrimStart('v') -ge [version]'0.1.21') {
+                # 用真实鼠标双击搜索栏，确认内嵌 WebView 原位迁移到独立窗口。
+                [DesktopNative]::SetForegroundWindow($settingsWindow) | Out-Null
+                $settingsRect = New-Object DesktopNative+Rect
+                [DesktopNative]::GetWindowRect($settingsWindow, [ref]$settingsRect) | Out-Null
+                [DesktopNative]::SetCursorPos($settingsRect.Left + 230, $settingsRect.Top + 30) | Out-Null
+                [DesktopNative]::mouse_event(0x0002, 0, 0, 0, [UIntPtr]::Zero)
+                [DesktopNative]::mouse_event(0x0004, 0, 0, 0, [UIntPtr]::Zero)
+                Start-Sleep -Milliseconds 120
+                [DesktopNative]::mouse_event(0x0002, 0, 0, 0, [UIntPtr]::Zero)
+                [DesktopNative]::mouse_event(0x0004, 0, 0, 0, [UIntPtr]::Zero)
+                $detachedSettings = Wait-WindowByTitleNearSize -Title '休息提醒' `
+                  -ExpectedWidth 800 -ExpectedHeight 600 -Tolerance 100
+                $diagnostics.breakSettingsDetached = $true
+                Save-DesktopScreenshot -Path 'artifacts/10-break-settings-detached.png'
+              }
               Stop-TestProcess -Process $breakSettingsProcess
               Start-Sleep -Seconds 2
 

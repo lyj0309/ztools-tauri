@@ -492,6 +492,27 @@ pub(crate) fn close_embedded_plugin(
 }
 
 /**
+ * 由主启动器把当前插件页面移到独立窗口。
+ * @param plugin_name 插件 manifest 名称。
+ * @param window 发起请求的主 Webview。
+ * @param runtime 插件身份注册表。
+ * @param app 桌面应用句柄。
+ * @returns 原 Webview 分离完成，失败时返回原因。
+ */
+#[tauri::command]
+pub(crate) fn detach_embedded_plugin(
+    plugin_name: String,
+    window: Webview,
+    runtime: State<'_, PluginRuntime>,
+    app: AppHandle,
+) -> Result<(), String> {
+    if window.label() != "main" {
+        return Err("只有主启动器可以分离插件".to_owned());
+    }
+    plugin::detach_embedded_plugin(&app, &runtime, &plugin_name)
+}
+
+/**
  * 在系统文件管理器中定位已安装插件目录。
  * @param plugin_name 插件 manifest 名称。
  * @param window 发起请求的主 Webview。

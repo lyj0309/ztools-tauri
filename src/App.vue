@@ -13,6 +13,7 @@ import {
   clearClipboardHistory,
   clearLaunchHistory,
   closeEmbeddedPlugin,
+  detachEmbeddedPlugin,
   copyClipboardText,
   createBackup,
   deleteLocalShortcut,
@@ -935,6 +936,22 @@ async function closeActivePlugin(): Promise<void> {
 }
 
 /**
+ * 双击顶部搜索栏时把当前插件移到独立窗口，主窗口回到搜索。
+ * @returns 插件分离完成后的 Promise。
+ */
+async function detachActivePlugin(): Promise<void> {
+  const plugin = activePlugin.value
+  if (!plugin) return
+  // Rust 负责迁移原 Webview 并发出关闭工作区事件，前端等待事件同步布局。
+  try {
+    await detachEmbeddedPlugin(plugin.name)
+  } catch (error) {
+    errorMessage.value = `分离插件失败：${String(error)}`
+    console.error('分离插件失败', error)
+  }
+}
+
+/**
  * 在顶栏输入新查询时退出当前插件页面。
  * @returns 无返回值。
  */
@@ -1454,6 +1471,12 @@ async function registerServiceEvents(): Promise<void> {
  * @returns 无返回值。
  */
 function handleKeyboard(event: KeyboardEvent): void {
+  // 和原版一样，在插件工作区用 Ctrl/Cmd+D 触发独立窗口分离。
+  if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'd' && activePlugin.value) {
+    event.preventDefault()
+    void detachActivePlugin()
+    return
+  }
   const resultCount =
     activeMode.value === 'apps'
       ? visibleLauncherResults.value.length
@@ -1674,7 +1697,7 @@ onUnmounted(() => {
     :style="{ '--accent-color': snapshot.settings.accentColor }"
     @keydown="handleKeyboard"
   >
-    <section class="search-panel">
+    <section class="search-panel" @dblclick="detachActivePlugin">
       <div class="search-field">
         <input
           ref="searchInput"

@@ -120,6 +120,7 @@ pub fn run() {
             commands::plugin::uninstall_plugin,
             commands::plugin::launch_plugin_feature,
             commands::plugin::close_embedded_plugin,
+            commands::plugin::detach_embedded_plugin,
             commands::plugin::reveal_plugin_directory,
             commands::plugin::get_installed_plugin_detail,
             commands::plugin::list_running_plugins,
