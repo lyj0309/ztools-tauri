@@ -1446,9 +1446,14 @@ async function registerServiceEvents(): Promise<void> {
       }
     }
   )
-  unlistenPluginPanelClosed = await listen<string>('plugin-panel-closed', (event) => {
+  unlistenPluginPanelClosed = await listen<string>('plugin-panel-closed', async (event) => {
     if (activePlugin.value?.name === event.payload) activePlugin.value = null
-    runningPluginNames.value = runningPluginNames.value.filter((name) => name !== event.payload)
+    // 分离只关闭主窗口中的工作区；仍在独立窗口运行的插件要保留运行标记。
+    try {
+      runningPluginNames.value = await listRunningPlugins()
+    } catch (error) {
+      console.warn('刷新运行中插件失败', error)
+    }
     // Linux 在销毁 GtkFixed 后才解除最小高度，下一帧重新计算搜索结果高度。
     window.setTimeout(() => void resizeLauncherWindow(), 80)
   })
