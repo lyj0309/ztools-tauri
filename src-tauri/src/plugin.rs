@@ -1402,15 +1402,15 @@ fn arrange_linux_embedded_views(main: &tauri::Window) -> Result<(), String> {
 
 /**
  * 关闭内嵌插件后把主 Webview 放回默认 GtkBox，恢复搜索结果的动态高度。
- * @param app 桌面应用句柄。
+ * @param _app 桌面应用句柄；非 Linux 平台无需重排原生视图。
  * @returns 布局复位任务投递结果。
  */
-pub(crate) fn reset_embedded_layout(app: &AppHandle) -> Result<(), String> {
+pub(crate) fn reset_embedded_layout(_app: &AppHandle) -> Result<(), String> {
     #[cfg(target_os = "linux")]
     {
         use gtk::prelude::*;
 
-        if let Some(main) = app.get_window("main") {
+        if let Some(main) = _app.get_window("main") {
             let window = main.clone();
             main.run_on_main_thread(move || {
                 let Ok(box_layout) = window.default_vbox() else {
