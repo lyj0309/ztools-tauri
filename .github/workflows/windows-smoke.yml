@@ -428,10 +428,13 @@ jobs:
                   -ExpectedWidth 540 -ExpectedHeight 570 -Tolerance 80
               }
               $diagnostics.breakSettingsVisible = $true
+              # WebView2 子视图可能晚于宿主窗口出现；等待正文渲染再测双击分离。
+              Start-Sleep -Seconds 4
               Save-DesktopScreenshot -Path 'artifacts/10-break-settings.png'
               if ([version]$env:RELEASE_TAG.TrimStart('v') -ge [version]'0.1.21') {
                 # 用真实鼠标双击搜索栏，确认内嵌 WebView 原位迁移到独立窗口。
                 [DesktopNative]::SetForegroundWindow($settingsWindow) | Out-Null
+                Start-Sleep -Milliseconds 350
                 $settingsRect = New-Object DesktopNative+Rect
                 [DesktopNative]::GetWindowRect($settingsWindow, [ref]$settingsRect) | Out-Null
                 [DesktopNative]::SetCursorPos($settingsRect.Left + 230, $settingsRect.Top + 30) | Out-Null
