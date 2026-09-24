@@ -442,7 +442,13 @@ pub(crate) fn plugin_show_notification(
         .map_err(|error| error.to_string())
 }
 
-/// 校验插件窗口身份，关闭插件并恢复主搜索窗口。
+/**
+ * 退出插件：内嵌视图只关闭子 Webview，独立插件则关闭整个外层窗口。
+ * @param window 发起退出的插件 Webview。
+ * @param runtime 插件身份注册表。
+ * @param app 桌面应用句柄。
+ * @returns 视图或窗口关闭完成，失败时返回原因。
+ */
 #[tauri::command]
 pub(crate) fn plugin_out(
     window: Webview,
@@ -452,12 +458,16 @@ pub(crate) fn plugin_out(
     runtime.plugin_for_window(window.label())?;
     let embedded = window.window().label() == "main";
     let plugin_name = window.label().trim_start_matches("plugin-").to_owned();
-    window.close().map_err(|error| error.to_string())?;
     if embedded {
+        // 内嵌插件共享主窗口，只能移除自己的 Webview 并恢复搜索结果布局。
+        window.close().map_err(|error| error.to_string())?;
         runtime.unregister_instance(&format!("plugin-{plugin_name}"));
         plugin::reset_embedded_layout(&app)?;
         app.emit_to("main", "plugin-panel-closed", plugin_name)
             .map_err(|error| error.to_string())?;
+    } else {
+        // 独立插件必须销毁顶层窗口，避免 Webview 关闭后留下空白弹窗。
+        window.window().close().map_err(|error| error.to_string())?;
     }
     Ok(())
 }
