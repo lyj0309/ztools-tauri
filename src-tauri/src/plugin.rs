@@ -20,7 +20,7 @@ use tauri::{
 };
 use walkdir::WalkDir;
 
-use crate::state::AppState;
+use crate::{models::LauncherSettings, state::AppState};
 
 const MAX_PLUGIN_FILES: usize = 5_000;
 const MAX_PLUGIN_BYTES: u64 = 100 * 1024 * 1024;
@@ -1883,20 +1883,25 @@ pub(crate) fn close_plugin_window(app: &AppHandle, plugin_name: &str) -> Result<
  * @param root 插件安装根目录。
  * @param webview_label 请求来源窗口标识。
  * @param request 当前资源请求。
+ * @param settings 当前宿主外观设置，启动早期缺失时使用默认值。
  * @returns 资源响应或未找到响应。
  */
 pub(crate) fn serve_plugin_asset(
     root: &Path,
     webview_label: &str,
     request: http::Request<Vec<u8>>,
+    settings: Option<&LauncherSettings>,
 ) -> http::Response<Vec<u8>> {
-    // 所有插件只共享宿主内置的只读 UI 样式，不开放其他插件的私有资源。
+    // 所有插件只共享宿主内置的只读 UI 样式，按当前宿主主题输出，避免手动主题与插件外观割裂。
     if request.uri().path() == "/_ui/theme.css" {
         return http::Response::builder()
             .status(http::StatusCode::OK)
             .header(http::header::CONTENT_TYPE, "text/css; charset=utf-8")
             .header("X-Content-Type-Options", "nosniff")
-            .body(include_bytes!("../resources/ui-theme.css").to_vec())
+            .header(http::header::CACHE_CONTROL, "no-store")
+            .body(theme_stylesheet(
+                settings.unwrap_or(&LauncherSettings::default()),
+            ))
             .unwrap_or_else(|_| http::Response::new(Vec::new()));
     }
     match resolve_plugin_asset(root, webview_label, request.uri().path())
@@ -1918,6 +1923,39 @@ pub(crate) fn serve_plugin_asset(
             .body(error.into_bytes())
             .unwrap_or_else(|_| http::Response::new(Vec::new())),
     }
+}
+
+/**
+ * 把宿主的主题与强调色安全地附加到公共插件样式，避免插件沿用系统主题。
+ * @param settings 当前启动器外观设置。
+ * @returns 基础样式和经过校验的外观覆盖样式。
+ */
+fn theme_stylesheet(settings: &LauncherSettings) -> Vec<u8> {
+    let mut css = include_bytes!("../resources/ui-theme.css").to_vec();
+    // 强调色只能是六位十六进制，防止用户设置值注入任意 CSS。
+    let accent = if settings.accent_color.len() == 7
+        && settings.accent_color.starts_with('#')
+        && settings.accent_color[1..]
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit())
+    {
+        settings.accent_color.as_str()
+    } else {
+        "#059669"
+    };
+    let palette = match settings.theme.as_str() {
+        "light" => "color-scheme: light; --z-ui-background: #f5f6fb; --z-ui-surface: #ffffff; --z-ui-surface-hover: #eef1f5; --z-ui-text: #242733; --z-ui-muted: #6c7280; --z-ui-border: #dfe3eb; --z-ui-shadow: 0 14px 38px rgba(20, 24, 35, .16);",
+        "dark" => "color-scheme: dark; --z-ui-background: #101116; --z-ui-surface: #1d1f28; --z-ui-surface-hover: #292c36; --z-ui-text: #f5f7fa; --z-ui-muted: #a1a6b2; --z-ui-border: #3a3d48; --z-ui-shadow: 0 14px 38px rgba(0, 0, 0, .36);",
+        _ => "",
+    };
+    // 覆盖样式位于媒体查询之后；重新打开插件时读取最新设置而不依赖浏览器缓存。
+    css.extend_from_slice(
+        format!(
+            "\n:root {{ --z-ui-accent: {accent}; --z-ui-accent-hover: color-mix(in srgb, {accent} 82%, black); --z-ui-accent-soft: color-mix(in srgb, {accent} 15%, var(--z-ui-surface)); {palette} }}\n"
+        )
+        .as_bytes(),
+    );
+    css
 }
 
 /**
@@ -2839,7 +2877,8 @@ fn now_millis() -> u128 {
 mod tests {
     use super::{
         extract_plugin_zip, http, plugin_summary, preload_adapter_script, read_manifest,
-        resolve_plugin_asset, serve_plugin_asset, validate_market_download_url, PluginRuntime,
+        resolve_plugin_asset, serve_plugin_asset, theme_stylesheet, validate_market_download_url,
+        LauncherSettings, PluginRuntime,
     };
     use std::{
         fs,
@@ -3030,10 +3069,35 @@ mod tests {
             .uri("/_ui/theme.css")
             .body(Vec::new())
             .unwrap();
-        let response = serve_plugin_asset(&root, "plugin-fixture", request);
+        let settings = LauncherSettings {
+            theme: "dark".to_owned(),
+            accent_color: "#ff5500".to_owned(),
+            ..LauncherSettings::default()
+        };
+        let response = serve_plugin_asset(&root, "plugin-fixture", request, Some(&settings));
         assert_eq!(response.status(), http::StatusCode::OK);
-        assert!(String::from_utf8_lossy(response.body()).contains("--z-ui-accent"));
+        let css = String::from_utf8_lossy(response.body());
+        assert!(css.contains("--z-ui-accent: #ff5500"));
+        assert!(css.contains("color-scheme: dark"));
+        assert_eq!(response.headers()[http::header::CACHE_CONTROL], "no-store");
         fs::remove_dir_all(root).expect("theme fixture should clean up");
+    }
+
+    /**
+     * 验证非十六进制强调色不能进入插件样式，手动浅色主题覆盖系统深色主题。
+     * @returns 无返回值。
+     */
+    #[test]
+    fn theme_stylesheet_rejects_invalid_accent() {
+        let settings = LauncherSettings {
+            theme: "light".to_owned(),
+            accent_color: "red; color: transparent".to_owned(),
+            ..LauncherSettings::default()
+        };
+        let css = String::from_utf8(theme_stylesheet(&settings)).unwrap();
+        assert!(css.contains("--z-ui-accent: #059669"));
+        assert!(css.contains("color-scheme: light"));
+        assert!(!css.contains("red; color"));
     }
 
     /// 验证市场目录不能把下载器重定向到明文、本机或相似域名。

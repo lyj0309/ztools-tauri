@@ -31,7 +31,10 @@ use tauri_plugin_autostart::MacosLauncher;
 use tauri_plugin_autostart::ManagerExt as AutostartManagerExt;
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
 
-/// 注册启动器服务并运行 Tauri 桌面事件循环。
+/**
+ * 注册启动器服务并运行 Tauri 桌面事件循环。
+ * @returns 无返回值。
+ */
 pub fn run() {
     #[cfg(target_os = "windows")]
     windows_ml::initialize();
@@ -39,7 +42,23 @@ pub fn run() {
     let protocol_root = plugin_root.clone();
     let application = tauri::Builder::default()
         .register_uri_scheme_protocol("ztools-plugin", move |context, request| {
-            plugin::serve_plugin_asset(&protocol_root, context.webview_label(), request)
+            // 读取当前宿主外观配置，让插件资源请求共享同一主题与强调色。
+            let settings = context
+                .app_handle()
+                .try_state::<AppState>()
+                .and_then(|state| {
+                    state
+                        .store
+                        .try_lock()
+                        .ok()
+                        .and_then(|store| store.settings().ok())
+                });
+            plugin::serve_plugin_asset(
+                &protocol_root,
+                context.webview_label(),
+                request,
+                settings.as_ref(),
+            )
         })
         // 单实例插件必须先处理第二次启动，再初始化其他桌面资源。
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {

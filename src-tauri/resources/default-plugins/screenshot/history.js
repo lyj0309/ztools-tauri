@@ -37,7 +37,7 @@ async function loadHistory() {
         for (const entry of entries) {
             const card = document.createElement('button');
             card.type = 'button';
-            card.className = 'image-card';
+            card.className = 'image-card z-ui-card';
             card.dataset.id = String(entry.id);
             const image = document.createElement('img');
             image.src = entry.thumbnail;
