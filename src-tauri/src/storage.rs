@@ -28,6 +28,14 @@ const CLIPBOARD_FILES_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS clipboard_files
                    files_json TEXT NOT NULL,
                    captured_at INTEGER NOT NULL
                  );";
+const PLUGIN_USAGE_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS plugin_usage (
+                   plugin_name TEXT NOT NULL,
+                   feature_code TEXT NOT NULL,
+                   used_at INTEGER NOT NULL,
+                   PRIMARY KEY(plugin_name, feature_code)
+                 );
+                 CREATE INDEX IF NOT EXISTS idx_plugin_usage_time
+                   ON plugin_usage(used_at DESC);";
 
 pub(crate) struct Store {
     connection: Connection,
@@ -67,14 +75,6 @@ impl Store {
                  );
                  CREATE INDEX IF NOT EXISTS idx_launch_history_time
                    ON launch_history(launched_at DESC);
-                 CREATE TABLE IF NOT EXISTS plugin_usage (
-                   plugin_name TEXT NOT NULL,
-                   feature_code TEXT NOT NULL,
-                   used_at INTEGER NOT NULL,
-                   PRIMARY KEY(plugin_name, feature_code)
-                 );
-                 CREATE INDEX IF NOT EXISTS idx_plugin_usage_time
-                   ON plugin_usage(used_at DESC);
                  CREATE TABLE IF NOT EXISTS pinned_apps (
                    app_id TEXT PRIMARY KEY,
                    name TEXT NOT NULL,
@@ -141,6 +141,9 @@ impl Store {
         connection
             .execute_batch(CLIPBOARD_FILES_SCHEMA)
             .map_err(|error| error.to_string())?;
+        connection
+            .execute_batch(PLUGIN_USAGE_SCHEMA)
+            .map_err(|error| error.to_string())?;
         Ok(Self { connection })
     }
 
@@ -158,7 +161,7 @@ impl Store {
     }
 
     /**
-     * 恢复已校验的数据库，并补建旧版本缺少的图片和文件历史表。
+     * 恢复已校验的数据库，并补建旧版本缺少的剪贴板与插件历史表。
      * @param path 备份数据库路径。
      * @returns 恢复与兼容迁移结果。
      */
@@ -182,6 +185,9 @@ impl Store {
             .map_err(|error| error.to_string())?;
         self.connection
             .execute_batch(CLIPBOARD_FILES_SCHEMA)
+            .map_err(|error| error.to_string())?;
+        self.connection
+            .execute_batch(PLUGIN_USAGE_SCHEMA)
             .map_err(|error| error.to_string())
     }
 
@@ -1202,7 +1208,41 @@ fn stable_text_hash(content: &str) -> String {
 mod tests {
     use super::Store;
     use crate::models::{AppEntry, LauncherSettings};
+    use rusqlite::Connection;
     use std::fs;
+
+    /**
+     * 验证恢复旧版备份后会补建插件最近使用表，避免启动器快照读取失败。
+     * @returns 无返回值。
+     */
+    #[test]
+    fn restores_backup_without_plugin_usage_schema() {
+        let directory = std::env::temp_dir().join(format!(
+            "ztools-old-plugin-history-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        fs::create_dir_all(&directory).expect("fixture directory should exist");
+        let current = directory.join("current.sqlite3");
+        let old_backup = directory.join("old.sqlite3");
+        let source = Store::open(&current).expect("store should open");
+        source.backup_to(&old_backup).expect("backup should save");
+        drop(source);
+        Connection::open(&old_backup)
+            .expect("old backup should open")
+            .execute_batch("DROP TABLE plugin_usage")
+            .expect("old backup should lack the new table");
+        let mut store = Store::open(&current).expect("store should reopen");
+        store
+            .restore_from(&old_backup)
+            .expect("old backup should restore");
+        assert!(store
+            .plugin_usage(10)
+            .expect("new table should exist")
+            .is_empty());
+        drop(store);
+        fs::remove_dir_all(directory).expect("fixture directory should clean up");
+    }
 
     /**
      * 验证图片历史去重排序、跨连接持久化、数量限制和统一清理。

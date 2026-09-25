@@ -116,6 +116,7 @@ function startApp(port, label) {
       ZTOOLS_E2E: '1',
       ZTOOLS_DATA_ROOT: join(testRoot, 'data'),
       ZTOOLS_PLUGIN_ROOT: join(testRoot, 'plugins'),
+      WEBVIEW2_USER_DATA_FOLDER: join(testRoot, `webview-${port}`),
       WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS: `--remote-debugging-port=${port}`
     },
     stdio: ['ignore', 'pipe', 'pipe']
