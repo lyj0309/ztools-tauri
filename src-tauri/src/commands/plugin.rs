@@ -1,3 +1,4 @@
+use std::time::{SystemTime, UNIX_EPOCH};
 use std::{fs, path::PathBuf, sync::Mutex};
 
 use tauri::{AppHandle, Emitter, Manager, State, Webview};
@@ -279,13 +280,16 @@ pub(crate) async fn launch_plugin_feature(
 ) -> Result<(), String> {
     if plugin_name == "setting" {
         let section = match feature_code.as_str() {
-            "general" | "appearance" | "data" | "plugins" | "market" | "services" => feature_code,
+            "general" | "appearance" | "data" | "plugins" | "market" | "services" => {
+                feature_code.clone()
+            }
             _ => return Err("未知的内置设置功能".to_owned()),
         };
         // 设置插件复用主窗口原生设置页，避免再装一份前端和 Node 依赖。
         app.emit_to("main", "open-settings-section", section)
             .map_err(|error| error.to_string())?;
         crate::commands::launcher::show_main_window(&app);
+        record_recent_plugin(&app, &plugin_name, &feature_code);
         return Ok(());
     }
     if plugin_name == "screenshot" {
@@ -301,14 +305,16 @@ pub(crate) async fn launch_plugin_feature(
         } else {
             crate::screenshot::start_editor(app.clone(), main, &feature_code).await?;
         }
+        record_recent_plugin(&app, &plugin_name, &feature_code);
         return Ok(());
     }
     if plugin_name == "system" {
         // 系统插件只转发 manifest 中声明的固定命令，由 Rust 白名单完成最终校验。
-        crate::commands::system::run_system_command(feature_code, app.clone())?;
+        crate::commands::system::run_system_command(feature_code.clone(), app.clone())?;
         if let Some(window) = app.get_window("main") {
             window.hide().map_err(|error| error.to_string())?;
         }
+        record_recent_plugin(&app, &plugin_name, &feature_code);
         return Ok(());
     }
     let kind = match payload.as_ref() {
@@ -317,11 +323,37 @@ pub(crate) async fn launch_plugin_feature(
         _ => "text",
     };
     let action = PluginEnterAction {
-        code: feature_code,
+        code: feature_code.clone(),
         kind: kind.to_owned(),
         payload: payload.unwrap_or(serde_json::Value::Null),
     };
-    plugin::launch_plugin(&app, &runtime, &plugin_name, action)
+    plugin::launch_plugin(&app, &runtime, &plugin_name, action)?;
+    record_recent_plugin(&app, &plugin_name, &feature_code);
+    Ok(())
+}
+
+/**
+ * 在插件成功打开后把功能写入宿主历史，历史写入失败不撤销已打开的插件。
+ * @param app 桌面宿主句柄。
+ * @param plugin_name 插件 manifest 名称。
+ * @param feature_code 启动的功能编码。
+ * @returns 无返回值。
+ */
+fn record_recent_plugin(app: &AppHandle, plugin_name: &str, feature_code: &str) {
+    // 记录时间使用与应用历史相同的 Unix 毫秒单位，供主页统一排序。
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis() as i64)
+        .unwrap_or(0);
+    let result = app
+        .state::<AppState>()
+        .store
+        .lock()
+        .map_err(|_| "数据库锁已损坏".to_owned())
+        .and_then(|store| store.record_plugin_usage(plugin_name, feature_code, timestamp));
+    if let Err(error) = result {
+        eprintln!("[plugin] cannot save recent use for {plugin_name}:{feature_code}: {error}");
+    }
 }
 
 /// 校验插件窗口身份后把文本写入系统剪贴板。

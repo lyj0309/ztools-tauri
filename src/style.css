@@ -965,24 +965,23 @@ footer .shortcut-label {
 .active-plugin-tag {
   display: flex;
   flex: 0 0 auto;
-  max-width: 235px;
-  height: 34px;
+  max-width: 280px;
+  height: 38px;
   align-items: center;
-  gap: 7px;
-  padding: 0 5px 0 8px;
+  gap: 6px;
+  padding: 0 4px 0 8px;
   color: var(--text-primary);
-  background: color-mix(in srgb, var(--accent-color) 15%, transparent);
-  border: 1px solid color-mix(in srgb, var(--accent-color) 28%, transparent);
-  border-radius: 8px;
+  background: color-mix(in srgb, var(--text-primary) 7%, transparent);
+  border-radius: 20px;
   -webkit-app-region: no-drag;
 }
 
 .active-plugin-tag > img,
 .active-plugin-fallback {
   display: grid;
-  flex: 0 0 22px;
-  width: 22px;
-  height: 22px;
+  flex: 0 0 20px;
+  width: 20px;
+  height: 20px;
   place-items: center;
   object-fit: contain;
   border-radius: 5px;
@@ -996,10 +995,11 @@ footer .shortcut-label {
 }
 
 .active-plugin-title {
-  max-width: 145px;
+  max-width: 190px;
   overflow: hidden;
   color: var(--text-primary);
-  font-size: 13px;
+  font-size: 16px;
+  font-weight: 600;
   text-overflow: ellipsis;
   white-space: nowrap;
 }

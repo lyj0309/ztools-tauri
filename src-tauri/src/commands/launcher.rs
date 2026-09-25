@@ -28,6 +28,7 @@ fn snapshot(state: &AppState) -> Result<LauncherSnapshot, String> {
     Ok(LauncherSnapshot {
         apps,
         history: store.history(30)?,
+        recent_plugin_usages: store.plugin_usage(30)?,
         clipboard: store.clipboard_history(100)?,
         local_shortcuts,
         pinned_ids: store.pinned_ids()?,

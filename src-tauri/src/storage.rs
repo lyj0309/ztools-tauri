@@ -9,7 +9,7 @@ use serde::Serialize;
 
 use crate::models::{
     AppEntry, ClipboardEntry, ClipboardFileItem, ClipboardFilesEntry, HistoryEntry,
-    LauncherSettings, LocalShortcut,
+    LauncherSettings, LocalShortcut, PluginUsageEntry,
 };
 use crate::sync::SyncDocument;
 
@@ -67,6 +67,14 @@ impl Store {
                  );
                  CREATE INDEX IF NOT EXISTS idx_launch_history_time
                    ON launch_history(launched_at DESC);
+                 CREATE TABLE IF NOT EXISTS plugin_usage (
+                   plugin_name TEXT NOT NULL,
+                   feature_code TEXT NOT NULL,
+                   used_at INTEGER NOT NULL,
+                   PRIMARY KEY(plugin_name, feature_code)
+                 );
+                 CREATE INDEX IF NOT EXISTS idx_plugin_usage_time
+                   ON plugin_usage(used_at DESC);
                  CREATE TABLE IF NOT EXISTS pinned_apps (
                    app_id TEXT PRIMARY KEY,
                    name TEXT NOT NULL,
@@ -367,10 +375,69 @@ impl Store {
             .map_err(|error| error.to_string())
     }
 
+    /**
+     * 保存成功启动的插件功能，重复使用时把它移到最近列表首位。
+     * @param plugin_name 插件 manifest 名称。
+     * @param feature_code 本次启动的功能编码。
+     * @param timestamp 启动时间，单位为毫秒。
+     * @returns 保存结果；失败时返回数据库错误。
+     */
+    pub(crate) fn record_plugin_usage(
+        &self,
+        plugin_name: &str,
+        feature_code: &str,
+        timestamp: i64,
+    ) -> Result<(), String> {
+        // 覆盖同一功能的时间，再限制总数，防止长期使用让启动库持续增长。
+        self.connection
+            .execute(
+                "INSERT INTO plugin_usage(plugin_name, feature_code, used_at)
+                 VALUES(?1, ?2, ?3)
+                 ON CONFLICT(plugin_name, feature_code) DO UPDATE SET used_at = excluded.used_at",
+                params![plugin_name, feature_code, timestamp],
+            )
+            .map_err(|error| error.to_string())?;
+        self.connection
+            .execute(
+                "DELETE FROM plugin_usage WHERE rowid NOT IN (
+                   SELECT rowid FROM plugin_usage ORDER BY used_at DESC LIMIT 500
+                 )",
+                [],
+            )
+            .map_err(|error| error.to_string())?;
+        self.touch_modified(timestamp)
+    }
+
+    /**
+     * 按最近使用时间返回已启动过的插件功能。
+     * @param limit 最多返回的功能数。
+     * @returns 最近插件功能列表；失败时返回数据库错误。
+     */
+    pub(crate) fn plugin_usage(&self, limit: usize) -> Result<Vec<PluginUsageEntry>, String> {
+        let mut statement = self
+            .connection
+            .prepare(
+                "SELECT plugin_name, feature_code, used_at
+                 FROM plugin_usage ORDER BY used_at DESC LIMIT ?1",
+            )
+            .map_err(|error| error.to_string())?;
+        let rows = statement
+            .query_map([limit as i64], |row| {
+                Ok(PluginUsageEntry {
+                    plugin_name: row.get(0)?,
+                    feature_code: row.get(1)?,
+                    used_at: row.get(2)?,
+                })
+            })
+            .map_err(|error| error.to_string())?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(|error| error.to_string())
+    }
+
     /// 清空全部本地启动历史。
     pub(crate) fn clear_history(&self) -> Result<(), String> {
         self.connection
-            .execute("DELETE FROM launch_history", [])
+            .execute_batch("DELETE FROM launch_history; DELETE FROM plugin_usage;")
             .map_err(|error| error.to_string())?;
         self.touch_modified(now_millis())
     }
@@ -1180,7 +1247,10 @@ mod tests {
         let _ = fs::remove_dir_all(directory);
     }
 
-    /// 验证设置、收藏与历史能够跨 SQLite 连接持久化。
+    /**
+     * 验证设置、收藏及应用和插件历史能够跨 SQLite 连接持久化。
+     * @returns 无返回值。
+     */
     #[test]
     fn persists_launcher_state() {
         let directory = std::env::temp_dir().join(format!(
@@ -1212,6 +1282,15 @@ mod tests {
         store
             .record_launch(&app, 1234)
             .expect("history should save");
+        store
+            .record_plugin_usage("clipboard", "clipboard", 1235)
+            .expect("plugin use should save");
+        store
+            .record_plugin_usage("screenshot", "capture", 1236)
+            .expect("newer plugin use should save");
+        store
+            .record_plugin_usage("clipboard", "clipboard", 1237)
+            .expect("repeated plugin use should move to top");
         store
             .capture_clipboard("copied text", 2345)
             .expect("clipboard should save");
@@ -1255,6 +1334,10 @@ mod tests {
             ["app-demo"]
         );
         assert_eq!(reopened.history(10).expect("history should load").len(), 1);
+        let recent_plugins = reopened.plugin_usage(10).expect("plugin use should load");
+        assert_eq!(recent_plugins.len(), 2);
+        assert_eq!(recent_plugins[0].plugin_name, "clipboard");
+        assert_eq!(recent_plugins[0].used_at, 1237);
         let clipboard = reopened
             .clipboard_history(10)
             .expect("clipboard should load");
@@ -1326,6 +1409,17 @@ mod tests {
         assert!(reopened
             .clipboard_history(10)
             .expect("clipboard should reload")
+            .is_empty());
+        reopened
+            .clear_history()
+            .expect("all launcher history should clear");
+        assert!(reopened
+            .history(10)
+            .expect("app history should clear")
+            .is_empty());
+        assert!(reopened
+            .plugin_usage(10)
+            .expect("plugin history should clear")
             .is_empty());
         drop(reopened);
 

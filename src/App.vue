@@ -58,6 +58,7 @@ import type {
   InstalledPluginDetail,
   MarketPlugin,
   MarketInstallProgress,
+  PluginUsageEntry,
   SyncStatus,
   UpdateInfo
 } from './types'
@@ -95,8 +96,7 @@ const localAliases = ref<Record<string, string>>({})
 const legacyPath = ref('')
 const legacyReport = ref<LegacyImportReport | null>(null)
 const plugins = ref<InstalledPlugin[]>([])
-type RecentPluginUsage = { pluginName: string; featureCode: string; usedAt: number }
-const recentPluginUsages = ref<RecentPluginUsage[]>([])
+const recentPluginUsages = ref<PluginUsageEntry[]>([])
 const failedPluginLogos = ref(new Set<string>())
 const pluginInstallPath = ref('')
 const pluginBusy = ref('')
@@ -118,6 +118,7 @@ const marketProgress = ref<Record<string, MarketInstallProgress>>({})
 const snapshot = ref<LauncherSnapshot>({
   apps: [],
   history: [],
+  recentPluginUsages: [],
   clipboard: [],
   pinnedIds: [],
   settings: {
@@ -253,26 +254,36 @@ const matchingPluginActions = computed<UnifiedLauncherResult[]>(() => {
   })
 })
 
-const recentPluginResults = computed<UnifiedLauncherResult[]>(() =>
-  recentPluginUsages.value.flatMap((usage) => {
+const recentLauncherResults = computed<UnifiedLauncherResult[]>(() => {
+  const entries: Array<{ result: UnifiedLauncherResult; usedAt: number }> = []
+  // 插件和系统应用共用原版“最近使用”区，按实际启动时间交错排列。
+  for (const usage of recentPluginUsages.value) {
     const plugin = plugins.value.find((candidate) => candidate.name === usage.pluginName)
     const feature = plugin?.features.find((candidate) => candidate.code === usage.featureCode)
-    return plugin && feature
-      ? [{
-          kind: 'plugin' as const,
+    if (plugin && feature) {
+      entries.push({
+        usedAt: usage.usedAt,
+        result: {
+          kind: 'plugin',
           key: `recent-plugin:${plugin.name}:${feature.code}`,
           plugin,
           featureCode: feature.code,
           explain: feature.explain || plugin.description || plugin.name,
           recent: true
-        }]
-      : []
-  })
-)
+        }
+      })
+    }
+  }
+  for (const history of snapshot.value.history) {
+    const app = snapshot.value.apps.find((candidate) => candidate.id === history.appId)
+    if (app) entries.push({ usedAt: history.launchedAt, result: { kind: 'app', key: `recent-app:${app.id}`, app } })
+  }
+  return entries.sort((left, right) => right.usedAt - left.usedAt).map((entry) => entry.result)
+})
 
 const visibleLauncherResults = computed<UnifiedLauncherResult[]>(() => {
   if (!query.value.trim()) {
-    return (snapshot.value.settings.showRecent ? recentPluginResults.value : []).slice(
+    return (snapshot.value.settings.showRecent ? recentLauncherResults.value : []).slice(
       0,
       snapshot.value.settings.maxResults
     )
@@ -506,7 +517,7 @@ const searchPlaceholder = computed(() => {
 const hasLauncherContent = computed(
   () =>
     Boolean(query.value.trim() || errorMessage.value) ||
-    (activeMode.value === 'apps' && snapshot.value.settings.showRecent && recentPluginResults.value.length > 0) ||
+    (activeMode.value === 'apps' && snapshot.value.settings.showRecent) ||
     (activeMode.value === 'files' && droppedPaths.value.length > 0)
 )
 
@@ -628,6 +639,16 @@ async function loadLauncher(): Promise<void> {
     ])
     snapshot.value = launcherSnapshot
     plugins.value = installedPlugins
+    // 新版宿主历史与上版 localStorage 记录合并，保留用户升级前已用过的插件。
+    const previous = recentPluginUsages.value
+    recentPluginUsages.value = [...launcherSnapshot.recentPluginUsages, ...previous]
+      .sort((left, right) => right.usedAt - left.usedAt)
+      .filter((entry, index, entries) =>
+        entries.findIndex((candidate) =>
+          candidate.pluginName === entry.pluginName && candidate.featureCode === entry.featureCode
+        ) === index
+      )
+      .slice(0, 30)
     settingsDraft.value = { ...snapshot.value.settings }
     localAliases.value = Object.fromEntries(
       snapshot.value.localShortcuts.map((shortcut) => [shortcut.id, shortcut.alias])
@@ -736,6 +757,7 @@ async function clearHistory(): Promise<void> {
   try {
     await clearLaunchHistory()
     snapshot.value.history = []
+    snapshot.value.recentPluginUsages = []
     recentPluginUsages.value = []
     // 清除插件最近使用缓存失败时，也不回滚已完成的数据库清理。
     try {
@@ -1573,6 +1595,20 @@ async function registerServiceEvents(): Promise<void> {
 }
 
 /**
+ * 先订阅插件工作区事件，再开放搜索结果，避免 Windows 上快速打开插件时漏掉左侧名称。
+ * @returns 启动器数据与事件订阅都就绪后的 Promise。
+ */
+async function initializeLauncher(): Promise<void> {
+  // 插件打开事件可能在命令完成前到达，必须先安装监听器再展示可点击结果。
+  try {
+    await registerServiceEvents()
+  } catch (error) {
+    console.error('注册启动器事件失败', error)
+  }
+  await loadLauncher()
+}
+
+/**
  * 根据键盘输入按原版九列网格移动选择、启动结果或关闭窗口。
  * @param event 搜索框键盘事件。
  * @returns 无返回值。
@@ -1785,7 +1821,7 @@ onMounted(() => {
     const savedRecentPlugins = JSON.parse(localStorage.getItem('recent-plugin-usages') || '[]')
     recentPluginUsages.value = Array.isArray(savedRecentPlugins)
       ? savedRecentPlugins.filter(
-          (entry): entry is RecentPluginUsage =>
+          (entry): entry is PluginUsageEntry =>
             entry !== null &&
             typeof entry === 'object' &&
             typeof entry.pluginName === 'string' &&
@@ -1797,9 +1833,8 @@ onMounted(() => {
     recentPluginUsages.value = []
   }
   void resizeLauncherWindow()
-  void loadLauncher()
+  void initializeLauncher()
   void registerDragAndDrop()
-  void registerServiceEvents()
   window.addEventListener('focus', handleWindowFocus)
 })
 
@@ -1867,8 +1902,8 @@ onUnmounted(() => {
         <p>正在读取系统应用…</p>
       </div>
       <div v-else-if="activeMode === 'apps' && visibleLauncherResults.length === 0" class="empty-state">
-        <strong>没有找到应用或插件指令</strong>
-        <p>换一个名称、命令或路径关键字试试</p>
+        <strong>{{ query.trim() ? '没有找到应用或插件指令' : '最近使用' }}</strong>
+        <p>{{ query.trim() ? '换一个名称、命令或路径关键字试试' : '使用过的应用和插件会显示在这里' }}</p>
       </div>
       <template v-else-if="activeMode === 'apps'">
         <div class="section-caption">{{ query.trim() ? '最佳搜索结果' : '最近使用' }}</div>

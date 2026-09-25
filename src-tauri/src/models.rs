@@ -32,6 +32,14 @@ pub(crate) struct HistoryEntry {
     pub(crate) launched_at: i64,
 }
 
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct PluginUsageEntry {
+    pub(crate) plugin_name: String,
+    pub(crate) feature_code: String,
+    pub(crate) used_at: i64,
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct ClipboardEntry {
@@ -146,6 +154,7 @@ pub(crate) struct UpdateInfo {
 pub(crate) struct LauncherSnapshot {
     pub(crate) apps: Vec<AppEntry>,
     pub(crate) history: Vec<HistoryEntry>,
+    pub(crate) recent_plugin_usages: Vec<PluginUsageEntry>,
     pub(crate) clipboard: Vec<ClipboardEntry>,
     pub(crate) local_shortcuts: Vec<LocalShortcut>,
     pub(crate) pinned_ids: Vec<String>,

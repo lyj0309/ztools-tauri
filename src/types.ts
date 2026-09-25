@@ -13,6 +13,12 @@ export interface HistoryEntry {
   launchedAt: number
 }
 
+export interface PluginUsageEntry {
+  pluginName: string
+  featureCode: string
+  usedAt: number
+}
+
 export interface ClipboardEntry {
   id: number
   content: string
@@ -136,6 +142,7 @@ export interface MarketInstallProgress {
 export interface LauncherSnapshot {
   apps: AppEntry[]
   history: HistoryEntry[]
+  recentPluginUsages: PluginUsageEntry[]
   clipboard: ClipboardEntry[]
   localShortcuts: LocalShortcut[]
   pinnedIds: string[]

@@ -1997,8 +1997,14 @@ fn plugin_summary(manifest: &PluginManifest, directory: &Path) -> InstalledPlugi
     let logo_url = if manifest.logo.trim().is_empty() {
         String::new()
     } else {
+        // WebView2 只把导航 URL 自动映射到 Windows 私有协议域名；img.src 需要直接使用该域名。
+        let origin = if cfg!(target_os = "windows") {
+            "http://ztools-plugin.localhost"
+        } else {
+            "ztools-plugin://localhost"
+        };
         format!(
-            "ztools-plugin://localhost/{}/{}",
+            "{origin}/{}/{}",
             manifest.name,
             encode_relative_url_path(&manifest.logo)
         )
@@ -2817,8 +2823,8 @@ fn now_millis() -> u128 {
 #[cfg(test)]
 mod tests {
     use super::{
-        extract_plugin_zip, preload_adapter_script, read_manifest, resolve_plugin_asset,
-        validate_market_download_url, PluginRuntime,
+        extract_plugin_zip, plugin_summary, preload_adapter_script, read_manifest,
+        resolve_plugin_asset, validate_market_download_url, PluginRuntime,
     };
     use std::{
         fs,
@@ -2947,7 +2953,10 @@ mod tests {
         fs::remove_dir_all(source).expect("source fixture should clean up");
     }
 
-    /// 验证资源协议只能读取与当前插件窗口身份一致的安装目录文件。
+    /**
+     * 验证资源协议权限和主窗口图标 URL 符合各平台 Webview 的实际协议。
+     * @returns 无返回值。
+     */
     #[test]
     fn confines_protocol_assets_to_matching_plugin_window() {
         let root = fixture_root("asset-root");
@@ -2970,6 +2979,17 @@ mod tests {
         )
         .expect("manifest with logo should exist");
         assert!(resolve_plugin_asset(&root, "main", "/fixture/logo.png").is_ok());
+        let manifest = read_manifest(&plugin).expect("manifest with logo should load");
+        let summary = plugin_summary(&manifest, &plugin);
+        let expected_origin = if cfg!(target_os = "windows") {
+            "http://ztools-plugin.localhost"
+        } else {
+            "ztools-plugin://localhost"
+        };
+        assert_eq!(
+            summary.logo_url,
+            format!("{expected_origin}/fixture/logo.png")
+        );
         assert!(resolve_plugin_asset(&root, "main", "/fixture/index.html").is_err());
         assert!(resolve_plugin_asset(&root, "main", "/fixture/assets/main.js").is_err());
 

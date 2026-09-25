@@ -535,6 +535,20 @@ jobs:
             Stop-TestProcess -Process $clipboardProcess
           }
 
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Verify Windows plugin icons, left title, and recent use
+        shell: pwsh
+        env:
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        run: |
+          if ([version]$env:RELEASE_TAG.TrimStart('v') -lt [version]'0.1.23') { exit 0 }
+          $asset = "ZTools_$($env:RELEASE_TAG)_windows_x64_portable.exe"
+          node scripts/windows-ui-smoke.mjs "artifacts/$asset" artifacts
+          if ($LASTEXITCODE -ne 0) { throw 'Windows plugin UI smoke failed' }
+
       - name: Upload Windows desktop evidence
         if: always()
         uses: actions/upload-artifact@v4
