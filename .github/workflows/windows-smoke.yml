@@ -703,9 +703,10 @@ jobs:
               [DesktopNative]::SetForegroundWindow($breakWindow) | Out-Null
               $breakRect = New-Object DesktopNative+Rect
               [DesktopNative]::GetWindowRect($breakWindow, [ref]$breakRect) | Out-Null
-              # WebView2 的初始键盘焦点不稳定，直接点击可见按钮验证真实鼠标交互。
+              # WebView2 的初始键盘焦点不稳定，按对应版本的实际按钮中心点击。
+              $skipButtonBottomOffset = if ([version]$env:RELEASE_TAG.TrimStart('v') -ge [version]'0.1.27') { 68 } else { 50 }
               [DesktopNative]::SetCursorPos(
-                [int](($breakRect.Left + $breakRect.Right) / 2), $breakRect.Bottom - 50
+                [int](($breakRect.Left + $breakRect.Right) / 2), $breakRect.Bottom - $skipButtonBottomOffset
               ) | Out-Null
               [DesktopNative]::mouse_event(0x0002, 0, 0, 0, [UIntPtr]::Zero)
               [DesktopNative]::mouse_event(0x0004, 0, 0, 0, [UIntPtr]::Zero)
