@@ -584,6 +584,56 @@ jobs:
                 $diagnostics.screenshotCopySize = @($copiedImage.Width, $copiedImage.Height)
               } finally { $copiedImage.Dispose() }
               Stop-TestProcess -Process $copyProcess
+
+              # 保存流程经过系统对话框，并验证对话框位于编辑器之上且 PNG 落盘。
+              $saveProcess = Start-Process -FilePath $executable -PassThru `
+                -RedirectStandardOutput 'artifacts/save-stdout.log' `
+                -RedirectStandardError 'artifacts/save-stderr.log'
+              $saveEditor = Wait-ProcessWindow -ProcessId $saveProcess.Id -MinWidth 800 -MinHeight 600
+              $saveRect = New-Object DesktopNative+Rect
+              [DesktopNative]::GetWindowRect($saveEditor, [ref]$saveRect) | Out-Null
+              [DesktopNative]::SetForegroundWindow($saveEditor) | Out-Null
+              [DesktopNative]::SetCursorPos($saveRect.Left + 120, $saveRect.Top + 100) | Out-Null
+              [DesktopNative]::mouse_event(0x0002, 0, 0, 0, [UIntPtr]::Zero)
+              for ($step = 1; $step -le 10; $step++) {
+                [DesktopNative]::SetCursorPos(
+                  [int]($saveRect.Left + 120 + 40 * $step),
+                  [int]($saveRect.Top + 100 + 24 * $step)
+                ) | Out-Null
+                Start-Sleep -Milliseconds 35
+              }
+              [DesktopNative]::mouse_event(0x0004, 0, 0, 0, [UIntPtr]::Zero)
+              Start-Sleep -Seconds 2
+              [DesktopNative]::GetWindowRect($saveEditor, [ref]$saveRect) | Out-Null
+              [DesktopNative]::SetCursorPos($saveRect.Right - 179, $saveRect.Bottom - 42) | Out-Null
+              [DesktopNative]::mouse_event(0x0002, 0, 0, 0, [UIntPtr]::Zero)
+              [DesktopNative]::mouse_event(0x0004, 0, 0, 0, [UIntPtr]::Zero)
+              $saveDialog = Wait-WindowByTitleNearSize -Title '保存截图' `
+                -ExpectedWidth 800 -ExpectedHeight 600 -Tolerance 500
+              Save-DesktopScreenshot -Path 'artifacts/09-save-dialog.png'
+              $savedPath = Join-Path $testRoot 'saved-screenshot.png'
+              Set-Clipboard -Value $savedPath
+              [DesktopNative]::SetForegroundWindow($saveDialog) | Out-Null
+              [DesktopNative]::keybd_event(0x11, 0, 0, [UIntPtr]::Zero)
+              [DesktopNative]::keybd_event(0x41, 0, 0, [UIntPtr]::Zero)
+              [DesktopNative]::keybd_event(0x41, 0, 0x0002, [UIntPtr]::Zero)
+              [DesktopNative]::keybd_event(0x56, 0, 0, [UIntPtr]::Zero)
+              [DesktopNative]::keybd_event(0x56, 0, 0x0002, [UIntPtr]::Zero)
+              [DesktopNative]::keybd_event(0x11, 0, 0x0002, [UIntPtr]::Zero)
+              [DesktopNative]::keybd_event(0x0D, 0, 0, [UIntPtr]::Zero)
+              [DesktopNative]::keybd_event(0x0D, 0, 0x0002, [UIntPtr]::Zero)
+              for ($attempt = 0; $attempt -lt 20 -and -not (Test-Path $savedPath); $attempt++) {
+                Start-Sleep -Milliseconds 500
+              }
+              if (-not (Test-Path $savedPath)) { throw 'Screenshot save dialog did not create PNG' }
+              $savedImage = [System.Drawing.Image]::FromFile($savedPath)
+              try {
+                if ([Math]::Abs($savedImage.Width - 400) -gt 2 -or [Math]::Abs($savedImage.Height - 240) -gt 2) {
+                  throw "Saved screenshot size is $($savedImage.Width)x$($savedImage.Height), expected 400x240"
+                }
+                $diagnostics.screenshotSaveSize = @($savedImage.Width, $savedImage.Height)
+              } finally { $savedImage.Dispose() }
+              Stop-TestProcess -Process $saveProcess
             }
 
             if ([version]$env:RELEASE_TAG.TrimStart('v') -ge [version]'0.1.17') {
@@ -709,6 +759,7 @@ jobs:
             Stop-TestProcess -Process $historyProcess
             Stop-TestProcess -Process $cancelProcess
             Stop-TestProcess -Process $copyProcess
+            Stop-TestProcess -Process $saveProcess
             Stop-TestProcess -Process $breakSettingsProcess
             Stop-TestProcess -Process $breakProcess
             Stop-TestProcess -Process $clipboardProcess

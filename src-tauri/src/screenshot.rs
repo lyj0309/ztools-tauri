@@ -378,7 +378,11 @@ pub(crate) async fn screenshot_save(
         .path()
         .picture_dir()
         .unwrap_or_else(|_| std::env::temp_dir());
-    let destination =
+    // 原生保存对话框必须位于编辑器前方，选择期间暂时撤销编辑器置顶。
+    window
+        .set_always_on_top(false)
+        .map_err(|error| error.to_string())?;
+    let save_result =
         tauri::async_runtime::spawn_blocking(move || -> Result<Option<PathBuf>, String> {
             // 原版保存操作由用户明确选路径；校验、对话框和磁盘写入全部留在阻塞线程。
             validate_png(&data)?;
@@ -397,9 +401,26 @@ pub(crate) async fn screenshot_save(
             }
             Ok(selected)
         })
-        .await
-        .map_err(|error| format!("截图保存任务异常结束：{error}"))??;
+        .await;
+    let destination = match save_result {
+        Ok(Ok(destination)) => destination,
+        Ok(Err(error)) => {
+            let _ = window.set_always_on_top(true);
+            let _ = window.set_focus();
+            return Err(error);
+        }
+        Err(error) => {
+            let _ = window.set_always_on_top(true);
+            let _ = window.set_focus();
+            return Err(format!("截图保存任务异常结束：{error}"));
+        }
+    };
     let Some(destination) = destination else {
+        // 用户取消保存后继续留在标注窗口，恢复原先的悬浮层级。
+        window
+            .set_always_on_top(true)
+            .and_then(|_| window.set_focus())
+            .map_err(|error| error.to_string())?;
         return Ok(String::new());
     };
     finish_editor(
