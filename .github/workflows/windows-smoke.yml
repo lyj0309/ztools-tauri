@@ -389,6 +389,12 @@ jobs:
                 throw 'Original screenshot annotation window did not open after selection'
               }
               $diagnostics.annotationBounds = @($editorRect.Left, $editorRect.Top, $editorRect.Right, $editorRect.Bottom)
+              $workArea = [System.Windows.Forms.Screen]::FromHandle($editor).WorkingArea
+              $diagnostics.annotationWorkArea = @($workArea.Left, $workArea.Top, $workArea.Right, $workArea.Bottom)
+              if ($editorRect.Left -lt $workArea.Left -or $editorRect.Top -lt $workArea.Top -or
+                  $editorRect.Right -gt $workArea.Right -or $editorRect.Bottom -gt $workArea.Bottom) {
+                throw 'Screenshot annotation window overlaps the taskbar or leaves the monitor working area'
+              }
               $diagnostics.editorImageColors = Assert-EditorImageVisible -Path 'artifacts/03-selection.png' -Bounds $editorRect
             }
 
@@ -396,9 +402,12 @@ jobs:
               # 从实际截图选区运行系统 OCR，通过真实键盘复制结果验证完整 IPC 链路。
               Set-Clipboard -Value 'ZTOOLS_OCR_PENDING'
               if ($usesOriginalEditor) {
+                [DesktopNative]::SetForegroundWindow($editor) | Out-Null
                 [DesktopNative]::SetCursorPos($editorRect.Right - 108, $editorRect.Bottom - 42) | Out-Null
                 [DesktopNative]::mouse_event(0x0002, 0, 0, 0, [UIntPtr]::Zero)
                 [DesktopNative]::mouse_event(0x0004, 0, 0, 0, [UIntPtr]::Zero)
+                Start-Sleep -Milliseconds 500
+                Save-DesktopScreenshot -Path 'artifacts/09-ocr-open.png'
               } else {
                 [DesktopNative]::keybd_event(0x4F, 0, 0, [UIntPtr]::Zero)
                 [DesktopNative]::keybd_event(0x4F, 0, 0x0002, [UIntPtr]::Zero)

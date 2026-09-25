@@ -302,8 +302,9 @@ pub(crate) fn screenshot_editor_select(
         .map_err(|error| error.to_string())?
         .ok_or_else(|| "无法定位截图显示器".to_owned())?;
     let scale = window.scale_factor().map_err(|error| error.to_string())?;
-    let available_width = f64::from(monitor.size().width) / scale;
-    let available_height = f64::from(monitor.size().height) / scale;
+    let work_area = monitor.work_area();
+    let available_width = f64::from(work_area.size.width.saturating_sub(24)) / scale;
+    let available_height = f64::from(work_area.size.height.saturating_sub(24)) / scale;
     let image_width = f64::from(image.width()) / scale;
     let image_height = f64::from(image.height()) / scale;
     let content_width_limit = (available_width - 80.0)
@@ -323,15 +324,45 @@ pub(crate) fn screenshot_editor_select(
         .app_handle()
         .cursor_position()
         .map_err(|error| error.to_string())?;
-    let origin = monitor.position();
-    let max_x = origin.x + monitor.size().width as i32 - (width * scale).round() as i32;
-    let max_y = origin.y + monitor.size().height as i32 - (height * scale).round() as i32;
-    let x = (cursor.x as i32 - (width * scale / 2.0).round() as i32).clamp(origin.x, max_x);
-    let y = (cursor.y as i32 - (height * scale / 2.0).round() as i32).clamp(origin.y, max_y);
+    // 先取得实际外框尺寸再按工作区定位，Windows 任务栏和窗口阴影均不占用按钮区域。
     window
         .set_size(LogicalSize::new(width, height))
-        .and_then(|_| window.set_position(PhysicalPosition::new(x, y)))
+        .map_err(|error| error.to_string())?;
+    let outer_size = window.outer_size().map_err(|error| error.to_string())?;
+    let position = compact_editor_position(cursor, work_area.position, work_area.size, outer_size);
+    window
+        .set_position(position)
         .map_err(|error| error.to_string())
+}
+
+/**
+ * 将紧凑标注窗口留在显示器工作区内，兼容任务栏和负坐标副屏。
+ * @param cursor 当前鼠标的物理屏幕位置。
+ * @param origin 工作区的物理左上角。
+ * @param available 工作区物理尺寸。
+ * @param outer 编辑器包含边框的实际外框尺寸。
+ * @returns 不越过工作区的窗口左上角。
+ */
+fn compact_editor_position(
+    cursor: PhysicalPosition<f64>,
+    origin: PhysicalPosition<i32>,
+    available: PhysicalSize<u32>,
+    outer: PhysicalSize<u32>,
+) -> PhysicalPosition<i32> {
+    let max_x = origin.x.saturating_add(
+        i32::try_from(available.width.saturating_sub(outer.width)).unwrap_or(i32::MAX),
+    );
+    let max_y = origin.y.saturating_add(
+        i32::try_from(available.height.saturating_sub(outer.height)).unwrap_or(i32::MAX),
+    );
+    PhysicalPosition::new(
+        (cursor.x.round() as i32)
+            .saturating_sub((outer.width / 2) as i32)
+            .clamp(origin.x, max_x),
+        (cursor.y.round() as i32)
+            .saturating_sub((outer.height / 2) as i32)
+            .clamp(origin.y, max_y),
+    )
 }
 
 /// 返回当前编辑器源图尺寸，供前端校验画布映射。
@@ -1090,10 +1121,40 @@ fn cleanup_pin(app: &AppHandle, label: &str) {
 #[cfg(test)]
 mod tests {
     use super::{
-        proportional_size, selection_pin_geometry, validate_png, EditorSource, ScreenshotRuntime,
-        MAX_SCREENSHOT_BYTES,
+        compact_editor_position, proportional_size, selection_pin_geometry, validate_png,
+        EditorSource, ScreenshotRuntime, MAX_SCREENSHOT_BYTES,
     };
     use tauri::{PhysicalPosition, PhysicalSize};
+
+    /**
+     * 验证紧凑标注窗口始终位于工作区内，工具栏不会被 Windows 任务栏遮住。
+     * @returns 无返回值。
+     */
+    #[test]
+    fn compact_editor_stays_above_taskbar() {
+        let position = compact_editor_position(
+            PhysicalPosition::new(820.0, 540.0),
+            PhysicalPosition::new(0, 0),
+            PhysicalSize::new(1024, 720),
+            PhysicalSize::new(740, 531),
+        );
+        assert_eq!(position, PhysicalPosition::new(284, 189));
+    }
+
+    /**
+     * 验证工作区处于负坐标副屏时，紧凑窗口仍按该显示器原点定位。
+     * @returns 无返回值。
+     */
+    #[test]
+    fn compact_editor_respects_negative_monitor_origin() {
+        let position = compact_editor_position(
+            PhysicalPosition::new(-120.0, 400.0),
+            PhysicalPosition::new(-1920, 40),
+            PhysicalSize::new(1920, 1000),
+            PhysicalSize::new(740, 531),
+        );
+        assert_eq!(position, PhysicalPosition::new(-740, 135));
+    }
 
     /**
      * 验证紧凑标注窗口不会改变贴图的源屏幕坐标，负坐标副屏也正确映射。
