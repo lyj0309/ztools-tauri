@@ -70,7 +70,7 @@ const refreshing = ref(false)
 const launchingId = ref<string | null>(null)
 const errorMessage = ref('')
 const settingsOpen = ref(false)
-const activePlugin = ref<{ name: string; title: string } | null>(null)
+const activePlugin = ref<{ name: string; title: string; logoUrl: string } | null>(null)
 let unlistenPluginPanelOpen: UnlistenFn | undefined
 let unlistenPluginPanelClosed: UnlistenFn | undefined
 type SettingsSection = 'general' | 'appearance' | 'data' | 'plugins' | 'market' | 'services'
@@ -95,6 +95,9 @@ const localAliases = ref<Record<string, string>>({})
 const legacyPath = ref('')
 const legacyReport = ref<LegacyImportReport | null>(null)
 const plugins = ref<InstalledPlugin[]>([])
+type RecentPluginUsage = { pluginName: string; featureCode: string; usedAt: number }
+const recentPluginUsages = ref<RecentPluginUsage[]>([])
+const failedPluginLogos = ref(new Set<string>())
 const pluginInstallPath = ref('')
 const pluginBusy = ref('')
 const pluginFilter = ref<'all' | 'running' | 'updates'>('all')
@@ -158,7 +161,7 @@ const visibleApps = computed(() => {
 
 type UnifiedLauncherResult =
   | { kind: 'app'; key: string; app: AppEntry }
-  | { kind: 'plugin'; key: string; plugin: InstalledPlugin; featureCode: string; explain: string }
+  | { kind: 'plugin'; key: string; plugin: InstalledPlugin; featureCode: string; explain: string; recent?: boolean }
   | { kind: 'system'; key: string; commandId: string; title: string; description: string }
   | { kind: 'url'; key: string; url: string; title: string }
 
@@ -250,13 +253,93 @@ const matchingPluginActions = computed<UnifiedLauncherResult[]>(() => {
   })
 })
 
-const visibleLauncherResults = computed<UnifiedLauncherResult[]>(() =>
-  [
+const recentPluginResults = computed<UnifiedLauncherResult[]>(() =>
+  recentPluginUsages.value.flatMap((usage) => {
+    const plugin = plugins.value.find((candidate) => candidate.name === usage.pluginName)
+    const feature = plugin?.features.find((candidate) => candidate.code === usage.featureCode)
+    return plugin && feature
+      ? [{
+          kind: 'plugin' as const,
+          key: `recent-plugin:${plugin.name}:${feature.code}`,
+          plugin,
+          featureCode: feature.code,
+          explain: feature.explain || plugin.description || plugin.name,
+          recent: true
+        }]
+      : []
+  })
+)
+
+const visibleLauncherResults = computed<UnifiedLauncherResult[]>(() => {
+  if (!query.value.trim()) {
+    return (snapshot.value.settings.showRecent ? recentPluginResults.value : []).slice(
+      0,
+      snapshot.value.settings.maxResults
+    )
+  }
+  return [
     ...matchingSystemActions.value,
     ...matchingPluginActions.value,
     ...visibleApps.value.map((app) => ({ kind: 'app' as const, key: `app:${app.id}`, app }))
   ].slice(0, snapshot.value.settings.maxResults)
-)
+})
+
+/**
+ * 持久化最近启动的插件功能，并让重复启动项回到列表首位。
+ * @param pluginName 插件 manifest 名称。
+ * @param featureCode 插件功能编码。
+ * @returns 无返回值。
+ */
+function rememberRecentPluginAction(pluginName: string, featureCode: string): void {
+  // 同一插件功能只保留最新一次，避免最近列表被重复启动记录占满。
+  recentPluginUsages.value = [
+    { pluginName, featureCode, usedAt: Date.now() },
+    ...recentPluginUsages.value.filter(
+      (entry) => entry.pluginName !== pluginName || entry.featureCode !== featureCode
+    )
+  ].slice(0, 30)
+  // 本地记录沿用已安装插件置顶项的存储位置，不要求插件或 Rust 侧增加专用接口。
+  try {
+    localStorage.setItem('recent-plugin-usages', JSON.stringify(recentPluginUsages.value))
+  } catch {
+    // 隐私模式禁止写入时仍在当前窗口显示最近使用项。
+  }
+}
+
+/**
+ * 启动插件功能，并在宿主接受请求后写入最近使用列表。
+ * @param pluginName 插件 manifest 名称。
+ * @param featureCode 插件功能编码。
+ * @param payload 传给插件的文本、文件路径或其他进入数据。
+ * @returns 插件启动请求完成后的 Promise。
+ * @throws Rust 宿主无法创建或唤起插件窗口时拒绝。
+ */
+async function launchPluginAction(
+  pluginName: string,
+  featureCode: string,
+  payload: unknown = null
+): Promise<void> {
+  await launchPluginFeature(pluginName, featureCode, payload)
+  rememberRecentPluginAction(pluginName, featureCode)
+}
+
+/**
+ * 判断插件图标是否存在且尚未报告加载失败。
+ * @param plugin 包含名称和图标地址的插件摘要。
+ * @returns 可加载图标存在时为 true。
+ */
+function hasPluginLogo(plugin: { name: string; logoUrl: string }): boolean {
+  return Boolean(plugin.logoUrl && !failedPluginLogos.value.has(plugin.name))
+}
+
+/**
+ * 记录插件图标加载失败，使界面显示名称首字母作为备用图标。
+ * @param pluginName 插件 manifest 名称。
+ * @returns 无返回值。
+ */
+function markPluginLogoFailed(pluginName: string): void {
+  failedPluginLogos.value = new Set([...failedPluginLogos.value, pluginName])
+}
 
 /**
  * 把明确的 HTTP 地址或域名查询转换为可安全打开的 URL。
@@ -423,6 +506,7 @@ const searchPlaceholder = computed(() => {
 const hasLauncherContent = computed(
   () =>
     Boolean(query.value.trim() || errorMessage.value) ||
+    (activeMode.value === 'apps' && snapshot.value.settings.showRecent && recentPluginResults.value.length > 0) ||
     (activeMode.value === 'files' && droppedPaths.value.length > 0)
 )
 
@@ -644,7 +728,7 @@ function scheduleSettingsSave(): void {
 }
 
 /**
- * 清除数据库与当前界面中的最近启动记录。
+ * 清除数据库中的应用历史和当前界面持久化的插件最近使用项。
  * @returns 清理完成后的 Promise。
  */
 async function clearHistory(): Promise<void> {
@@ -652,6 +736,13 @@ async function clearHistory(): Promise<void> {
   try {
     await clearLaunchHistory()
     snapshot.value.history = []
+    recentPluginUsages.value = []
+    // 清除插件最近使用缓存失败时，也不回滚已完成的数据库清理。
+    try {
+      localStorage.removeItem('recent-plugin-usages')
+    } catch {
+      // 当前窗口中的列表仍已清空，浏览器存储限制只影响下次启动恢复。
+    }
   } catch (error) {
     errorMessage.value = String(error)
   }
@@ -913,7 +1004,7 @@ async function runPlugin(plugin: InstalledPlugin): Promise<void> {
   errorMessage.value = ''
   try {
     const featureCode = pluginFeatureCode(plugin, query.value.trim())
-    await launchPluginFeature(plugin.name, featureCode, query.value || null)
+    await launchPluginAction(plugin.name, featureCode, query.value || null)
   } catch (error) {
     errorMessage.value = String(error)
   } finally {
@@ -1079,7 +1170,7 @@ async function launchUnifiedResult(result: UnifiedLauncherResult): Promise<void>
   pluginBusy.value = result.plugin.name
   errorMessage.value = ''
   try {
-    await launchPluginFeature(result.plugin.name, result.featureCode, query.value.trim())
+    await launchPluginAction(result.plugin.name, result.featureCode, query.value.trim())
   } catch (error) {
     errorMessage.value = String(error)
   } finally {
@@ -1097,7 +1188,7 @@ async function runPluginWithFiles(plugin: InstalledPlugin, featureCode: string):
   pluginBusy.value = plugin.name
   errorMessage.value = ''
   try {
-    await launchPluginFeature(plugin.name, featureCode, [...droppedPaths.value])
+    await launchPluginAction(plugin.name, featureCode, [...droppedPaths.value])
   } catch (error) {
     errorMessage.value = String(error)
   } finally {
@@ -1363,7 +1454,7 @@ async function runScreenCapture(): Promise<void> {
   serviceBusy.value = 'screenshot'
   serviceMessage.value = ''
   try {
-    await launchPluginFeature('screenshot', 'capture', null)
+    await launchPluginAction('screenshot', 'capture', null)
     serviceMessage.value = '请选择截图区域，可标注后复制、保存或贴图'
   } catch (error) {
     serviceMessage.value = String(error)
@@ -1443,8 +1534,10 @@ async function registerServiceEvents(): Promise<void> {
   unlistenPluginPanelOpen = await listen<{ name: string; title: string }>(
     'plugin-panel-open',
     (event) => {
+      // 顶栏图标从已安装摘要取回，Rust 事件只传插件身份和标题。
+      const plugin = plugins.value.find((entry) => entry.name === event.payload.name)
+      activePlugin.value = { ...event.payload, logoUrl: plugin?.logoUrl || '' }
       // 插件内容占用搜索框下方的工作区，宿主只保留顶栏和关闭入口。
-      activePlugin.value = event.payload
       settingsOpen.value = false
       if (event.payload.name === 'clipboard') query.value = ''
       if (event.payload.name === 'clipboard') {
@@ -1688,6 +1781,21 @@ onMounted(() => {
   } catch {
     pinnedPluginNames.value = []
   }
+  try {
+    const savedRecentPlugins = JSON.parse(localStorage.getItem('recent-plugin-usages') || '[]')
+    recentPluginUsages.value = Array.isArray(savedRecentPlugins)
+      ? savedRecentPlugins.filter(
+          (entry): entry is RecentPluginUsage =>
+            entry !== null &&
+            typeof entry === 'object' &&
+            typeof entry.pluginName === 'string' &&
+            typeof entry.featureCode === 'string' &&
+            typeof entry.usedAt === 'number'
+        )
+      : []
+  } catch {
+    recentPluginUsages.value = []
+  }
   void resizeLauncherWindow()
   void loadLauncher()
   void registerDragAndDrop()
@@ -1722,6 +1830,18 @@ onUnmounted(() => {
   >
     <section class="search-panel" @dblclick="detachActivePlugin">
       <div class="search-field">
+        <div v-if="activePlugin" class="active-plugin-tag">
+          <img
+            v-if="hasPluginLogo(activePlugin)"
+            :src="activePlugin.logoUrl"
+            alt=""
+            draggable="false"
+            @error="markPluginLogoFailed(activePlugin.name)"
+          />
+          <span v-else class="active-plugin-fallback">{{ activePlugin.title.slice(0, 1).toLocaleUpperCase() }}</span>
+          <span class="active-plugin-title">{{ activePlugin.title }}</span>
+          <button type="button" class="active-plugin-close" title="关闭插件" @click.stop="closeActivePlugin">×</button>
+        </div>
         <input
           ref="searchInput"
           v-model="query"
@@ -1733,8 +1853,6 @@ onUnmounted(() => {
           @input="onSearchInput"
         />
       </div>
-      <span v-if="activePlugin" class="active-plugin-title">{{ activePlugin.title }}</span>
-      <button v-if="activePlugin" type="button" class="active-plugin-close" title="关闭插件" @click="closeActivePlugin">×</button>
       <span v-if="query" class="tab-hint">切换选中 <kbd>Tab</kbd></span>
       <button class="profile-button" :title="settingsOpen ? '返回搜索' : '设置'" @click="settingsOpen ? settingsOpen = false : openSettings()">
         <img :src="ztoolsLogo" alt="ZTools" />
@@ -1753,7 +1871,7 @@ onUnmounted(() => {
         <p>换一个名称、命令或路径关键字试试</p>
       </div>
       <template v-else-if="activeMode === 'apps'">
-        <div class="section-caption">最佳搜索结果</div>
+        <div class="section-caption">{{ query.trim() ? '最佳搜索结果' : '最近使用' }}</div>
         <button
           v-for="(result, index) in visibleLauncherResults"
           :key="result.key"
@@ -1786,14 +1904,14 @@ onUnmounted(() => {
           </template>
           <template v-else-if="result.kind === 'plugin'">
             <span class="app-icon plugin-icon">
-              <img v-if="result.plugin.logoUrl" :src="result.plugin.logoUrl" alt="" />
+              <img v-if="hasPluginLogo(result.plugin)" :src="result.plugin.logoUrl" alt="" @error="markPluginLogoFailed(result.plugin.name)" />
               <template v-else>{{ result.plugin.title.slice(0, 1).toLocaleUpperCase() }}</template>
             </span>
             <span class="app-copy">
               <strong>{{ result.plugin.name === 'screenshot' && result.featureCode === 'pin' ? '贴图' : result.plugin.title }}</strong>
               <small>{{ result.explain }} · {{ result.featureCode }}</small>
             </span>
-            <span class="row-status">插件指令</span>
+            <span class="row-status">{{ result.recent ? '最近使用' : '插件指令' }}</span>
           </template>
           <template v-else>
             <span class="app-icon">{{ result.kind === 'url' ? '↗' : '⌘' }}</span>
@@ -1825,7 +1943,10 @@ onUnmounted(() => {
           @dblclick="runPlugin(plugin)"
           @click="selectedIndex = index"
         >
-          <span class="app-icon plugin-icon">{{ plugin.title.slice(0, 1).toLocaleUpperCase() }}</span>
+          <span class="app-icon plugin-icon">
+            <img v-if="hasPluginLogo(plugin)" :src="plugin.logoUrl" alt="" @error="markPluginLogoFailed(plugin.name)" />
+            <template v-else>{{ plugin.title.slice(0, 1).toLocaleUpperCase() }}</template>
+          </span>
           <span class="app-copy">
             <strong>{{ plugin.title }}</strong>
             <small>{{ plugin.features[0]?.explain || plugin.description || plugin.name }}</small>
@@ -1888,7 +2009,10 @@ onUnmounted(() => {
             @dblclick="runPluginWithFiles(action.plugin, action.featureCode)"
             @click="selectedIndex = index"
           >
-            <span class="app-icon plugin-icon">{{ action.plugin.title.slice(0, 1) }}</span>
+            <span class="app-icon plugin-icon">
+              <img v-if="hasPluginLogo(action.plugin)" :src="action.plugin.logoUrl" alt="" @error="markPluginLogoFailed(action.plugin.name)" />
+              <template v-else>{{ action.plugin.title.slice(0, 1) }}</template>
+            </span>
             <span class="app-copy">
               <strong>{{ action.plugin.title }}</strong>
               <small>{{ action.featureCode }} · {{ droppedPaths.length }} 个路径</small>
@@ -2137,8 +2261,8 @@ onUnmounted(() => {
                 @click="openInstalledDetail(plugin)"
               >
                 <div class="installed-icon-wrap">
-                  <img v-if="plugin.logoUrl" :src="plugin.logoUrl" class="installed-plugin-icon" alt="插件图标" draggable="false" />
-                  <div v-else class="installed-plugin-placeholder">🧩</div>
+                  <img v-if="hasPluginLogo(plugin)" :src="plugin.logoUrl" class="installed-plugin-icon" alt="插件图标" draggable="false" @error="markPluginLogoFailed(plugin.name)" />
+                  <div v-else class="installed-plugin-placeholder">{{ plugin.title.slice(0, 1).toLocaleUpperCase() }}</div>
                   <span v-if="plugin.development" class="installed-dev-badge">DEV</span>
                   <span v-if="installedUpdates.some((entry) => entry.name === plugin.name)" class="installed-update-dot"></span>
                 </div>
@@ -2175,8 +2299,8 @@ onUnmounted(() => {
             </div>
             <div class="installed-detail-content">
               <div class="installed-detail-heading">
-                <img v-if="selectedPlugin.logoUrl" :src="selectedPlugin.logoUrl" alt="插件图标" draggable="false" />
-                <div v-else class="installed-detail-placeholder">🧩</div>
+                <img v-if="hasPluginLogo(selectedPlugin)" :src="selectedPlugin.logoUrl" alt="插件图标" draggable="false" @error="markPluginLogoFailed(selectedPlugin.name)" />
+                <div v-else class="installed-detail-placeholder">{{ selectedPlugin.title.slice(0, 1).toLocaleUpperCase() }}</div>
                 <div><h3>{{ selectedPlugin.title }}</h3><p>{{ selectedPlugin.description || '暂无描述' }}</p></div>
                 <button v-if="selectedMarketPlugin && isPluginUpdateAvailable(selectedPlugin.version, selectedMarketPlugin.version)" type="button" @click="installMarketPlugin(selectedPlugin.name)">更新</button>
               </div>
@@ -2200,7 +2324,7 @@ onUnmounted(() => {
               <div v-else-if="pluginDetailTab === 'commands'" class="installed-detail-tab-content">
                 <div v-for="feature in selectedPlugin.features" :key="feature.code" class="installed-feature-card">
                   <div><strong>{{ feature.explain || feature.code }}</strong><small>{{ feature.code }}</small></div>
-                  <button type="button" :disabled="selectedPlugin.compatibility === 'needs-adaptation'" @click="launchPluginFeature(selectedPlugin.name, feature.code)">打开</button>
+                  <button type="button" :disabled="selectedPlugin.compatibility === 'needs-adaptation'" @click="launchPluginAction(selectedPlugin.name, feature.code)">打开</button>
                 </div>
                 <p v-if="selectedPlugin.features.length === 0">该插件暂无指令</p>
               </div>

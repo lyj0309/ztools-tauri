@@ -1,6 +1,6 @@
 {
   "name": "ztools-tauri",
-  "version": "0.1.22",
+  "version": "0.1.23",
   "private": true,
   "description": "A native application launcher built with Tauri 2",
   "license": "MIT",
