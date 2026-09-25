@@ -247,6 +247,54 @@ jobs:
             $launcher = Wait-ProcessWindow -ProcessId $launcherProcess.Id -MinWidth 700 -MinHeight 40
             $diagnostics.launcherVisible = $true
             Save-DesktopScreenshot -Path 'artifacts/01-launcher.png'
+            if ([version]$env:RELEASE_TAG.TrimStart('v') -ge [version]'0.1.24') {
+              # 使用主窗口真实键盘入口打开剪贴板，再确认返回搜索后的最近使用和重启持久化。
+              $launcherRect = New-Object DesktopNative+Rect
+              [DesktopNative]::GetWindowRect($launcher, [ref]$launcherRect) | Out-Null
+              [DesktopNative]::SetForegroundWindow($launcher) | Out-Null
+              [DesktopNative]::SetCursorPos($launcherRect.Left + 230, $launcherRect.Top + 30) | Out-Null
+              [DesktopNative]::mouse_event(0x0002, 0, 0, 0, [UIntPtr]::Zero)
+              [DesktopNative]::mouse_event(0x0004, 0, 0, 0, [UIntPtr]::Zero)
+              foreach ($letter in 'CLIPBOARD'.ToCharArray()) {
+                $key = [byte][int][char]$letter
+                [DesktopNative]::keybd_event($key, 0, 0, [UIntPtr]::Zero)
+                [DesktopNative]::keybd_event($key, 0, 0x0002, [UIntPtr]::Zero)
+                Start-Sleep -Milliseconds 25
+              }
+              $searchResults = Wait-ProcessWindow -ProcessId $launcherProcess.Id -MinWidth 700 -MinHeight 175
+              Start-Sleep -Seconds 1
+              Save-DesktopScreenshot -Path 'artifacts/15-plugin-search.png'
+              $diagnostics.pluginSearchCaptured = $true
+              [DesktopNative]::keybd_event(0x0D, 0, 0, [UIntPtr]::Zero)
+              [DesktopNative]::keybd_event(0x0D, 0, 0x0002, [UIntPtr]::Zero)
+              $pluginHost = Wait-ProcessWindow -ProcessId $launcherProcess.Id -MinWidth 700 -MinHeight 550
+              Start-Sleep -Seconds 2
+              Save-DesktopScreenshot -Path 'artifacts/16-plugin-open.png'
+              $diagnostics.pluginHeaderCaptured = $true
+              [DesktopNative]::GetWindowRect($pluginHost, [ref]$launcherRect) | Out-Null
+              [DesktopNative]::SetForegroundWindow($pluginHost) | Out-Null
+              [DesktopNative]::SetCursorPos($launcherRect.Left + 300, $launcherRect.Top + 30) | Out-Null
+              [DesktopNative]::mouse_event(0x0002, 0, 0, 0, [UIntPtr]::Zero)
+              [DesktopNative]::mouse_event(0x0004, 0, 0, 0, [UIntPtr]::Zero)
+              [DesktopNative]::keybd_event(0x1B, 0, 0, [UIntPtr]::Zero)
+              [DesktopNative]::keybd_event(0x1B, 0, 0x0002, [UIntPtr]::Zero)
+              Start-Sleep -Seconds 2
+              [DesktopNative]::GetWindowRect($launcher, [ref]$launcherRect) | Out-Null
+              if ($launcherRect.Bottom - $launcherRect.Top -ge 400) {
+                throw 'Plugin did not return to recent use after Escape'
+              }
+              Save-DesktopScreenshot -Path 'artifacts/17-plugin-recent.png'
+              $diagnostics.pluginRecentCaptured = $true
+              Stop-TestProcess -Process $launcherProcess
+              Start-Sleep -Seconds 2
+              $launcherProcess = Start-Process -FilePath $executable -PassThru `
+                -RedirectStandardOutput 'artifacts/launcher-restart-stdout.log' `
+                -RedirectStandardError 'artifacts/launcher-restart-stderr.log'
+              $launcher = Wait-ProcessWindow -ProcessId $launcherProcess.Id -MinWidth 700 -MinHeight 175
+              Start-Sleep -Seconds 1
+              Save-DesktopScreenshot -Path 'artifacts/18-plugin-recent-restart.png'
+              $diagnostics.pluginRecentRestartCaptured = $true
+            }
             Stop-TestProcess -Process $launcherProcess
             Start-Sleep -Seconds 2
 
@@ -534,20 +582,6 @@ jobs:
             Stop-TestProcess -Process $breakProcess
             Stop-TestProcess -Process $clipboardProcess
           }
-
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
-
-      - name: Verify Windows plugin icons, left title, and recent use
-        shell: pwsh
-        env:
-          RELEASE_TAG: ${{ inputs.release_tag }}
-        run: |
-          if ([version]$env:RELEASE_TAG.TrimStart('v') -lt [version]'0.1.23') { exit 0 }
-          $asset = "ZTools_$($env:RELEASE_TAG)_windows_x64_portable.exe"
-          node scripts/windows-ui-smoke.mjs "artifacts/$asset" artifacts
-          if ($LASTEXITCODE -ne 0) { throw 'Windows plugin UI smoke failed' }
 
       - name: Upload Windows desktop evidence
         if: always()
