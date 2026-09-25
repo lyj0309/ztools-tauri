@@ -204,6 +204,49 @@ jobs:
             }
           }
 
+          function Assert-EditorImageVisible {
+            param([string]$Path, [DesktopNative+Rect]$Bounds)
+            $bitmap = [System.Drawing.Bitmap]::FromFile((Resolve-Path $Path).Path)
+            try {
+              $screen = [System.Windows.Forms.SystemInformation]::VirtualScreen
+              $left = [Math]::Max(0, $Bounds.Left - $screen.Left + 24)
+              $top = [Math]::Max(0, $Bounds.Top - $screen.Top + 24)
+              $right = [Math]::Min($bitmap.Width, $Bounds.Right - $screen.Left - 24)
+              $bottom = [Math]::Min($bitmap.Height, $Bounds.Bottom - $screen.Top - 90)
+              $colors = New-Object 'System.Collections.Generic.HashSet[int]'
+              for ($y = $top; $y -lt $bottom; $y += 8) {
+                for ($x = $left; $x -lt $right; $x += 8) {
+                  [void]$colors.Add($bitmap.GetPixel($x, $y).ToArgb())
+                }
+              }
+              if ($colors.Count -lt 12) {
+                throw "Screenshot editor canvas is blank or not painted ($($colors.Count) sampled colors)"
+              }
+              return $colors.Count
+            } finally {
+              $bitmap.Dispose()
+            }
+          }
+
+          function Assert-RedAnnotationVisible {
+            param([string]$Path, [DesktopNative+Rect]$Bounds)
+            $bitmap = [System.Drawing.Bitmap]::FromFile((Resolve-Path $Path).Path)
+            try {
+              $screen = [System.Windows.Forms.SystemInformation]::VirtualScreen
+              $count = 0
+              for ($y = $Bounds.Top - $screen.Top + 40; $y -lt $Bounds.Bottom - $screen.Top - 90; $y += 2) {
+                for ($x = $Bounds.Left - $screen.Left + 40; $x -lt $Bounds.Right - $screen.Left - 40; $x += 2) {
+                  $color = $bitmap.GetPixel($x, $y)
+                  if ($color.R -gt 180 -and $color.G -lt 110 -and $color.B -lt 150) { $count++ }
+                }
+              }
+              if ($count -lt 20) { throw "Screenshot rectangle annotation was not painted ($count red pixels)" }
+              return $count
+            } finally {
+              $bitmap.Dispose()
+            }
+          }
+
           function Stop-TestProcess {
             param([System.Diagnostics.Process]$Process)
             if ($Process -and -not $Process.HasExited) {
@@ -346,6 +389,7 @@ jobs:
                 throw 'Original screenshot annotation window did not open after selection'
               }
               $diagnostics.annotationBounds = @($editorRect.Left, $editorRect.Top, $editorRect.Right, $editorRect.Bottom)
+              $diagnostics.editorImageColors = Assert-EditorImageVisible -Path 'artifacts/03-selection.png' -Bounds $editorRect
             }
 
             if ([version]$env:RELEASE_TAG.TrimStart('v') -ge [version]'0.1.15') {
@@ -390,6 +434,20 @@ jobs:
               [DesktopNative]::mouse_event(0x0004, 0, 0, 0, [UIntPtr]::Zero)
             }
 
+            if ([version]$env:RELEASE_TAG.TrimStart('v') -ge [version]'0.1.25') {
+              # 用真实鼠标画矩形并检查成品颜色，避免“画布可见但标注未落图”。
+              [DesktopNative]::SetCursorPos($editorRect.Left + 74, $editorRect.Bottom - 42) | Out-Null
+              [DesktopNative]::mouse_event(0x0002, 0, 0, 0, [UIntPtr]::Zero)
+              [DesktopNative]::mouse_event(0x0004, 0, 0, 0, [UIntPtr]::Zero)
+              [DesktopNative]::SetCursorPos($editorRect.Left + 130, $editorRect.Top + 100) | Out-Null
+              [DesktopNative]::mouse_event(0x0002, 0, 0, 0, [UIntPtr]::Zero)
+              [DesktopNative]::SetCursorPos($editorRect.Left + 340, $editorRect.Top + 210) | Out-Null
+              [DesktopNative]::mouse_event(0x0004, 0, 0, 0, [UIntPtr]::Zero)
+              Start-Sleep -Seconds 1
+              Save-DesktopScreenshot -Path 'artifacts/03-annotation.png'
+              $diagnostics.annotationRedPixels = Assert-RedAnnotationVisible -Path 'artifacts/03-annotation.png' -Bounds $editorRect
+            }
+
             # 原版标注工具栏点击贴图，旧版保留 P 快捷键；两者都覆盖二进制 IPC 和贴图窗口链路。
             [DesktopNative]::SetForegroundWindow($editor) | Out-Null
             if ($usesOriginalEditor) {
@@ -410,6 +468,10 @@ jobs:
             $pinRect = New-Object DesktopNative+Rect
             [DesktopNative]::GetWindowRect($pin, [ref]$pinRect) | Out-Null
             $diagnostics.pinBounds = @($pinRect.Left, $pinRect.Top, $pinRect.Right, $pinRect.Bottom)
+            if ($usesOriginalEditor -and
+                ([Math]::Abs($pinRect.Left - $startX) -gt 8 -or [Math]::Abs($pinRect.Top - $startY) -gt 8)) {
+              throw "Floating image moved from original selection: expected ($startX,$startY), got ($($pinRect.Left),$($pinRect.Top))"
+            }
             Save-DesktopScreenshot -Path 'artifacts/05-pin.png'
 
             # 滚轮必须同时改变宽高，校验客户区以排除 Windows 非客户区边框影响。
@@ -456,6 +518,73 @@ jobs:
             }
             $diagnostics.historyImagePinned = $true
             Save-DesktopScreenshot -Path 'artifacts/08-history-pin.png'
+
+            if ([version]$env:RELEASE_TAG.TrimStart('v') -ge [version]'0.1.25') {
+              # 取消流程必须关闭编辑器，避免残留全屏蒙层或卡住启动器。
+              Stop-TestProcess -Process $historyProcess
+              $env:ZTOOLS_E2E_PLUGIN_FEATURE = 'capture'
+              $cancelProcess = Start-Process -FilePath $executable -PassThru `
+                -RedirectStandardOutput 'artifacts/cancel-stdout.log' `
+                -RedirectStandardError 'artifacts/cancel-stderr.log'
+              $cancelEditor = Wait-ProcessWindow -ProcessId $cancelProcess.Id -MinWidth 800 -MinHeight 600
+              [DesktopNative]::SetForegroundWindow($cancelEditor) | Out-Null
+              [DesktopNative]::keybd_event(0x1B, 0, 0, [UIntPtr]::Zero)
+              [DesktopNative]::keybd_event(0x1B, 0, 0x0002, [UIntPtr]::Zero)
+              Start-Sleep -Seconds 2
+              if ([DesktopNative]::IsWindowVisible($cancelEditor)) { throw 'Escape did not cancel screenshot' }
+              $diagnostics.screenshotCancelWorks = $true
+              Stop-TestProcess -Process $cancelProcess
+
+              # 复制流程检查 Windows 剪贴板中确实有选区图片及正确尺寸。
+              $copyProcess = Start-Process -FilePath $executable -PassThru `
+                -RedirectStandardOutput 'artifacts/copy-stdout.log' `
+                -RedirectStandardError 'artifacts/copy-stderr.log'
+              $copyEditor = Wait-ProcessWindow -ProcessId $copyProcess.Id -MinWidth 800 -MinHeight 600
+              $copyRect = New-Object DesktopNative+Rect
+              [DesktopNative]::GetWindowRect($copyEditor, [ref]$copyRect) | Out-Null
+              $copyStartX = $copyRect.Left + 120
+              $copyStartY = $copyRect.Top + 100
+              $copyEndX = $copyStartX + 420
+              $copyEndY = $copyStartY + 250
+              [DesktopNative]::SetForegroundWindow($copyEditor) | Out-Null
+              [DesktopNative]::SetCursorPos($copyStartX, $copyStartY) | Out-Null
+              [DesktopNative]::mouse_event(0x0002, 0, 0, 0, [UIntPtr]::Zero)
+              for ($step = 1; $step -le 10; $step++) {
+                [DesktopNative]::SetCursorPos(
+                  [int]($copyStartX + (($copyEndX - $copyStartX) * $step / 10)),
+                  [int]($copyStartY + (($copyEndY - $copyStartY) * $step / 10))
+                ) | Out-Null
+                Start-Sleep -Milliseconds 35
+              }
+              [DesktopNative]::mouse_event(0x0004, 0, 0, 0, [UIntPtr]::Zero)
+              Start-Sleep -Seconds 2
+              [DesktopNative]::GetWindowRect($copyEditor, [ref]$copyRect) | Out-Null
+              [DesktopNative]::SetCursorPos($copyRect.Right - 138, $copyRect.Bottom - 42) | Out-Null
+              [DesktopNative]::mouse_event(0x0002, 0, 0, 0, [UIntPtr]::Zero)
+              [DesktopNative]::mouse_event(0x0004, 0, 0, 0, [UIntPtr]::Zero)
+              Start-Sleep -Seconds 2
+              if ([DesktopNative]::IsWindowVisible($copyEditor)) { throw 'Copy did not close screenshot editor' }
+              $clipboardProbe = Join-Path $testRoot 'copied-screenshot.png'
+              $clipboardScript = Join-Path $testRoot 'save-image-clipboard.ps1'
+              @'
+          param([string]$Path)
+          Add-Type -AssemblyName System.Windows.Forms
+          $image = [System.Windows.Forms.Clipboard]::GetImage()
+          if (-not $image) { throw 'Screenshot copy did not put an image on the clipboard' }
+          try { $image.Save($Path, [System.Drawing.Imaging.ImageFormat]::Png) }
+          finally { $image.Dispose() }
+          '@ | Set-Content -Path $clipboardScript -Encoding UTF8
+              & powershell.exe -NoProfile -STA -File $clipboardScript $clipboardProbe
+              if ($LASTEXITCODE -ne 0) { throw 'Could not read copied screenshot from Windows clipboard' }
+              $copiedImage = [System.Drawing.Image]::FromFile($clipboardProbe)
+              try {
+                if ([Math]::Abs($copiedImage.Width - 420) -gt 2 -or [Math]::Abs($copiedImage.Height - 250) -gt 2) {
+                  throw "Copied screenshot size is $($copiedImage.Width)x$($copiedImage.Height), expected 420x250"
+                }
+                $diagnostics.screenshotCopySize = @($copiedImage.Width, $copiedImage.Height)
+              } finally { $copiedImage.Dispose() }
+              Stop-TestProcess -Process $copyProcess
+            }
 
             if ([version]$env:RELEASE_TAG.TrimStart('v') -ge [version]'0.1.17') {
               # 新版设置页嵌入主搜索框，真实提醒仍使用独立窗口。
@@ -578,6 +707,8 @@ jobs:
             Stop-TestProcess -Process $launcherProcess
             Stop-TestProcess -Process $screenshotProcess
             Stop-TestProcess -Process $historyProcess
+            Stop-TestProcess -Process $cancelProcess
+            Stop-TestProcess -Process $copyProcess
             Stop-TestProcess -Process $breakSettingsProcess
             Stop-TestProcess -Process $breakProcess
             Stop-TestProcess -Process $clipboardProcess

@@ -30,3 +30,16 @@ button:hover { background: #336c4d; }
 .break-panel button { background: transparent; color: #466a53; border: 1px solid #b8d0bd; }
 .break-panel button:hover { background: #e7f0e7; }
 [hidden] { display: none !important; }
+
+/* 设置页沿用宿主的语义色和控件节奏，提醒页保留舒缓的单页结构。 */
+:root { color-scheme: light dark; font-family: var(--z-ui-font); background: var(--z-ui-background); color: var(--z-ui-text); }
+.eyebrow, .status, .countdown { color: var(--z-ui-accent); }
+.intro, .toggle-row small, .hint, .unit-field { color: var(--z-ui-muted); }
+.toggle-row, input[type="number"] { color: var(--z-ui-text); background: var(--z-ui-surface); border-color: var(--z-ui-border); }
+.fields label { border-bottom-color: var(--z-ui-border); }
+input[type="checkbox"]:checked, button { background: var(--z-ui-accent); }
+input:focus-visible, button:focus-visible { outline-color: var(--z-ui-accent); }
+button:hover { background: var(--z-ui-accent-hover); }
+.break-symbol { background: color-mix(in srgb, var(--z-ui-accent) 16%, var(--z-ui-surface)); color: var(--z-ui-accent); }
+.break-panel button { color: var(--z-ui-accent); border-color: var(--z-ui-border); }
+.break-panel button:hover { background: var(--z-ui-surface-hover); }

@@ -26,8 +26,15 @@ const MAX_SCREENSHOT_BYTES: usize = 64 * 1024 * 1024;
 /// 管理截图编辑器源图和悬浮贴图临时文件。
 pub(crate) struct ScreenshotRuntime {
     next_id: AtomicU64,
-    editor_source: Mutex<Option<PathBuf>>,
+    editor_source: Mutex<Option<EditorSource>>,
     pins: Mutex<HashMap<String, PathBuf>>,
+}
+
+/// 保留选区对应的原始显示器坐标，编辑器缩成紧凑窗口后仍能原位贴图。
+struct EditorSource {
+    path: PathBuf,
+    monitor_position: PhysicalPosition<i32>,
+    monitor_size: PhysicalSize<u32>,
 }
 
 impl ScreenshotRuntime {
@@ -45,14 +52,18 @@ impl ScreenshotRuntime {
         self.next_id.fetch_add(1, Ordering::Relaxed)
     }
 
-    /// 替换编辑器源图并清理上一份临时文件。
-    fn replace_editor_source(&self, path: PathBuf) -> Result<(), String> {
+    /**
+     * 记录截图源图与捕获时的显示器边界，并清理上一份临时文件。
+     * @param source 新截图源图及显示器边界。
+     * @returns 更新状态的结果。
+     */
+    fn replace_editor_source(&self, next_source: EditorSource) -> Result<(), String> {
         let mut source = self
             .editor_source
             .lock()
             .map_err(|_| "截图状态锁已损坏".to_owned())?;
-        if let Some(previous) = source.replace(path) {
-            let _ = fs::remove_file(previous);
+        if let Some(previous) = source.replace(next_source) {
+            let _ = fs::remove_file(previous.path);
         }
         Ok(())
     }
@@ -62,13 +73,45 @@ impl ScreenshotRuntime {
         self.editor_source
             .lock()
             .map_err(|_| "截图状态锁已损坏".to_owned())?
-            .clone()
+            .as_ref()
+            .map(|source| source.path.clone())
+            .ok_or_else(|| "截图编辑会话已经结束".to_owned())
+    }
+
+    /**
+     * 返回截图时固定的显示器边界，供贴图按源图坐标定位。
+     * @returns 显示器左上角与物理尺寸。
+     */
+    fn editor_monitor(&self) -> Result<(PhysicalPosition<i32>, PhysicalSize<u32>), String> {
+        self.editor_source
+            .lock()
+            .map_err(|_| "截图状态锁已损坏".to_owned())?
+            .as_ref()
+            .map(|source| (source.monitor_position, source.monitor_size))
             .ok_or_else(|| "截图编辑会话已经结束".to_owned())
     }
 
     /// 取出编辑器源图，使后续窗口销毁回调不会重复删除。
     fn take_editor_source(&self) -> Option<PathBuf> {
-        self.editor_source.lock().ok()?.take()
+        self.editor_source
+            .lock()
+            .ok()?
+            .take()
+            .map(|source| source.path)
+    }
+
+    /**
+     * 仅当销毁的旧窗口仍持有当前源图时取出它，避免误删新截图会话。
+     * @param expected 销毁窗口创建时绑定的截图文件。
+     * @returns 匹配时的源图路径，否则返回空。
+     */
+    fn take_editor_source_if(&self, expected: &Path) -> Option<PathBuf> {
+        let mut source = self.editor_source.lock().ok()?;
+        if source.as_ref()?.path == expected {
+            source.take().map(|entry| entry.path)
+        } else {
+            None
+        }
     }
 
     /// 注册悬浮贴图临时文件。
@@ -130,6 +173,8 @@ pub(crate) async fn start_editor(app: AppHandle, main: Window, mode: &str) -> Re
         return Err("未知的截图模式".to_owned());
     }
     if let Some(existing) = app.get_webview_window(EDITOR_LABEL) {
+        // 重启截图前先撤销旧会话，旧窗口销毁回调不得误删新截图或弹出启动器。
+        cleanup_editor_source(&app);
         let _ = existing.close();
     }
 
@@ -162,7 +207,11 @@ pub(crate) async fn start_editor(app: AppHandle, main: Window, mode: &str) -> Re
         crate::commands::launcher::show_main_window(&app);
         return Err(error);
     }
-    runtime.replace_editor_source(source)?;
+    runtime.replace_editor_source(EditorSource {
+        path: source.clone(),
+        monitor_position,
+        monitor_size,
+    })?;
 
     let build_result = WebviewWindowBuilder::new(
         &app,
@@ -190,8 +239,9 @@ pub(crate) async fn start_editor(app: AppHandle, main: Window, mode: &str) -> Re
     };
     editor.on_window_event({
         let app = app.clone();
+        let source = source.clone();
         move |event| {
-            if matches!(event, WindowEvent::Destroyed) && cleanup_editor_source(&app) {
+            if matches!(event, WindowEvent::Destroyed) && cleanup_editor_source_if(&app, &source) {
                 // 非正常销毁仍恢复启动器；正常完成会先取走会话，因此不会重复弹窗和抢焦点。
                 crate::commands::launcher::show_main_window(&app);
             }
@@ -246,7 +296,7 @@ pub(crate) fn screenshot_editor_select(
     // 选区确定后不再需要全屏底图；复用会话临时文件避免把大图片放进 Web 存储。
     fs::write(runtime.editor_source()?, data).map_err(|error| error.to_string())?;
 
-    // 原版标注器是围绕光标的紧凑窗口；在页面切换时隐藏全屏选区窗口并调整到同样的尺寸。
+    // 原版标注器是围绕光标的紧凑窗口；先调整窗口，失败时仍保留可见选区与错误提示。
     let monitor = window
         .current_monitor()
         .map_err(|error| error.to_string())?
@@ -278,7 +328,6 @@ pub(crate) fn screenshot_editor_select(
     let max_y = origin.y + monitor.size().height as i32 - (height * scale).round() as i32;
     let x = (cursor.x as i32 - (width * scale / 2.0).round() as i32).clamp(origin.x, max_x);
     let y = (cursor.y as i32 - (height * scale / 2.0).round() as i32).clamp(origin.y, max_y);
-    window.hide().map_err(|error| error.to_string())?;
     window
         .set_size(LogicalSize::new(width, height))
         .and_then(|_| window.set_position(PhysicalPosition::new(x, y)))
@@ -401,23 +450,56 @@ pub(crate) async fn screenshot_pin(
     let y = request_number(&request, "x-ztools-selection-y")?;
     let width = request_number(&request, "x-ztools-selection-width")?;
     let height = request_number(&request, "x-ztools-selection-height")?;
-    if !x.is_finite() || !y.is_finite() || !width.is_finite() || !height.is_finite() {
-        return Err("贴图位置或尺寸无效".to_owned());
+    let image = decode_png(&data)?;
+    if (width - f64::from(image.width())).abs() > 1.0
+        || (height - f64::from(image.height())).abs() > 1.0
+    {
+        return Err("贴图尺寸与截图不一致".to_owned());
     }
-    let width = width.round().clamp(1.0, 16_384.0) as u32;
-    let height = height.round().clamp(1.0, 16_384.0) as u32;
-    let editor_position = window.outer_position().map_err(|error| error.to_string())?;
-    create_pin(
-        &app,
-        data,
-        PhysicalPosition::new(
-            editor_position.x.saturating_add(x.round() as i32),
-            editor_position.y.saturating_add(y.round() as i32),
-        ),
-        PhysicalSize::new(width, height),
-    )
-    .await?;
+    let (monitor_position, monitor_size) = app.state::<ScreenshotRuntime>().editor_monitor()?;
+    let (position, size) =
+        selection_pin_geometry(monitor_position, monitor_size, x, y, width, height)?;
+    create_pin(&app, data, position, size).await?;
     finish_editor(&app, &window, "pinned", None, false)
+}
+
+/**
+ * 将源截图选区映射到捕获时的显示器物理坐标，而非已移动的标注窗口。
+ * @param monitor_position 捕获显示器的左上角，允许负坐标。
+ * @param monitor_size 捕获显示器的物理尺寸。
+ * @param x 选区在源截图内的横坐标。
+ * @param y 选区在源截图内的纵坐标。
+ * @param width 选区物理宽度。
+ * @param height 选区物理高度。
+ * @returns 贴图的屏幕位置与尺寸。
+ * @throws 选区越过捕获边界时返回错误。
+ */
+fn selection_pin_geometry(
+    monitor_position: PhysicalPosition<i32>,
+    monitor_size: PhysicalSize<u32>,
+    x: f64,
+    y: f64,
+    width: f64,
+    height: f64,
+) -> Result<(PhysicalPosition<i32>, PhysicalSize<u32>), String> {
+    // 校验源图选区，拒绝伪造的超出屏幕边界位置和尺寸。
+    if ![x, y, width, height].iter().all(|value| value.is_finite())
+        || x < 0.0
+        || y < 0.0
+        || width < 1.0
+        || height < 1.0
+        || x + width > f64::from(monitor_size.width) + 1.0
+        || y + height > f64::from(monitor_size.height) + 1.0
+    {
+        return Err("贴图选区超出截图显示器".to_owned());
+    }
+    Ok((
+        PhysicalPosition::new(
+            monitor_position.x.saturating_add(x.round() as i32),
+            monitor_position.y.saturating_add(y.round() as i32),
+        ),
+        PhysicalSize::new(width.round() as u32, height.round() as u32),
+    ))
 }
 
 /**
@@ -959,6 +1041,24 @@ fn cleanup_editor_source(app: &AppHandle) -> bool {
     false
 }
 
+/**
+ * 只清理指定窗口绑定的源图，保护同名新编辑器创建时的文件。
+ * @param app 桌面宿主句柄。
+ * @param expected 销毁窗口原先绑定的截图路径。
+ * @returns 清理到匹配源图时为真。
+ */
+fn cleanup_editor_source_if(app: &AppHandle, expected: &Path) -> bool {
+    if let Some(path) = app
+        .state::<ScreenshotRuntime>()
+        .take_editor_source_if(expected)
+    {
+        let _ = fs::remove_file(path);
+        true
+    } else {
+        false
+    }
+}
+
 /// 删除指定贴图的临时文件和运行时记录。
 fn cleanup_pin(app: &AppHandle, label: &str) {
     if let Some(path) = app.state::<ScreenshotRuntime>().remove_pin(label) {
@@ -968,7 +1068,76 @@ fn cleanup_pin(app: &AppHandle, label: &str) {
 
 #[cfg(test)]
 mod tests {
-    use super::{proportional_size, validate_png, MAX_SCREENSHOT_BYTES};
+    use super::{
+        proportional_size, selection_pin_geometry, validate_png, EditorSource, ScreenshotRuntime,
+        MAX_SCREENSHOT_BYTES,
+    };
+    use tauri::{PhysicalPosition, PhysicalSize};
+
+    /**
+     * 验证紧凑标注窗口不会改变贴图的源屏幕坐标，负坐标副屏也正确映射。
+     * @returns 无返回值。
+     */
+    #[test]
+    fn pins_selection_at_capture_monitor_position() {
+        for (origin, expected) in [((0, 0), (120, 100)), ((-1920, 240), (-1800, 340))] {
+            let (position, size) = selection_pin_geometry(
+                PhysicalPosition::new(origin.0, origin.1),
+                PhysicalSize::new(1920, 1080),
+                120.0,
+                100.0,
+                700.0,
+                440.0,
+            )
+            .unwrap();
+            assert_eq!((position.x, position.y), expected);
+            assert_eq!((size.width, size.height), (700, 440));
+        }
+    }
+
+    /**
+     * 拒绝源截图边界外的贴图坐标，避免创建不可见窗口。
+     * @returns 无返回值。
+     */
+    #[test]
+    fn rejects_selection_outside_capture_monitor() {
+        let origin = PhysicalPosition::new(-1920, 0);
+        let size = PhysicalSize::new(1920, 1080);
+        assert!(selection_pin_geometry(origin, size, -1.0, 0.0, 100.0, 100.0).is_err());
+        assert!(selection_pin_geometry(origin, size, 1900.0, 0.0, 100.0, 100.0).is_err());
+        assert!(selection_pin_geometry(origin, size, 0.0, f64::NAN, 100.0, 100.0).is_err());
+    }
+
+    /**
+     * 验证连续启动截图时旧窗口销毁不会取走新会话源图。
+     * @returns 无返回值。
+     */
+    #[test]
+    fn old_editor_close_keeps_new_capture_source() {
+        let runtime = ScreenshotRuntime::new();
+        let root = std::env::temp_dir().join(format!(
+            "ztools-editor-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let old = root.join("old.png");
+        let next = root.join("next.png");
+        for path in [&old, &next] {
+            runtime
+                .replace_editor_source(EditorSource {
+                    path: path.clone(),
+                    monitor_position: PhysicalPosition::new(0, 0),
+                    monitor_size: PhysicalSize::new(800, 600),
+                })
+                .unwrap();
+        }
+        assert!(runtime.take_editor_source_if(&old).is_none());
+        assert_eq!(runtime.editor_source().unwrap(), next);
+        assert_eq!(runtime.take_editor_source_if(&next), Some(next));
+    }
 
     /**
      * 验证横图、竖图及缩小图片在缩放上限附近仍保持原图比例。

@@ -163,16 +163,51 @@ async function mountExtraActions() {
 }
 
 /**
+ * 等待原版 Vue 编辑器完成图片解码和画布首帧，防止提前展示空白标注窗口。
+ * @param width 源截图宽度。
+ * @param height 源截图高度。
+ * @returns 画布内容准备完成后的 Promise。
+ * @throws 原版画布未在限定时间内完成绘制时抛错。
+ */
+async function waitForOriginalCanvas(width, height) {
+  const deadline = performance.now() + 10000;
+  // Vue 挂载和 Image.onload 分别异步运行，画布尺寸匹配后再等待浏览器提交一帧。
+  while (performance.now() < deadline) {
+    const canvas = document.querySelector('.editor-shell canvas.capture-canvas');
+    if (canvas instanceof HTMLCanvasElement && canvas.width === width && canvas.height === height) {
+      await new Promise((resolve) => requestAnimationFrame(resolve));
+      return;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  throw new Error('截图标注画布未能加载原图');
+}
+
+/**
  * 建立原版截图编辑器需要的浏览器适配层，然后加载其原始 Vue 资源。
  * @returns 原版编辑器启动完成后的 Promise。
  */
 async function initializeOriginalEditor() {
   const bytes = responseBytes(await invoke('screenshot_editor_source'));
   editorDataUrl = await pngDataUrl(bytes);
+  const sourceImage = new Image();
+  sourceImage.src = editorDataUrl;
+  await sourceImage.decode();
+  // 原版编辑器用这三个字段计算舞台的 CSS 尺寸，缺少它们会出现“导出正常、窗口空白”。
+  const viewScale = Math.min(
+    1,
+    Math.max(1, window.innerWidth - 24) / sourceImage.naturalWidth,
+    Math.max(1, window.innerHeight - 82) / sourceImage.naturalHeight
+  );
   sessionStorage.removeItem('ztools-original-selection');
   // 原版只需要同步读取一次截图数据，数据从 Rust 临时文件取得且不落入 Web 存储。
   window.ztools = Object.freeze({ dbStorage: {
-    getItem: () => ({ dataUrl: editorDataUrl }),
+    getItem: () => ({
+      dataUrl: editorDataUrl,
+      cssWidth: sourceImage.naturalWidth,
+      cssHeight: sourceImage.naturalHeight,
+      viewScale
+    }),
     removeItem: () => undefined
   } });
   window.shortcutCapture = Object.freeze({
@@ -186,6 +221,7 @@ async function initializeOriginalEditor() {
   });
   document.querySelector('#app').innerHTML = '';
   await import('./assets/index-CRZJr_0k.js');
+  await waitForOriginalCanvas(sourceImage.naturalWidth, sourceImage.naturalHeight);
   await invoke('screenshot_editor_ready');
   void mountExtraActions();
 }

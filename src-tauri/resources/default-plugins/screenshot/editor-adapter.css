@@ -1,5 +1,7 @@
 html, body { width: 100%; height: 100%; overflow: hidden; }
 body { background: rgba(20, 24, 31, .88); }
+:root { --primary-color: var(--z-ui-accent); --primary-hover: var(--z-ui-accent-hover); --text-primary: var(--z-ui-text); --text-secondary: var(--z-ui-muted); --border-color: var(--z-ui-border); --toolbar-glass-bg: var(--z-ui-surface); --toolbar-glass-border: var(--z-ui-border); --toolbar-glass-shadow: rgba(0, 0, 0, .25); --tool-active-bg: color-mix(in srgb, var(--z-ui-accent) 17%, transparent); --tool-active-border: var(--z-ui-accent); }
+.editor-shell .stage, .editor-shell canvas.capture-canvas { -webkit-app-region: no-drag !important; }
 .editor-loading { margin: 40px; color: #fff; font: 14px system-ui, sans-serif; }
 .ztools-extra-panel { position: fixed; right: 16px; top: 16px; z-index: 20; width: min(420px, calc(100vw - 32px)); padding: 12px; color: #eef5fa; background: #1c232b; border: 1px solid #5b6c78; border-radius: 8px; box-shadow: 0 8px 32px #0008; }
 .ztools-extra-panel[hidden] { display: none; }

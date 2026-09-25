@@ -1878,12 +1878,27 @@ pub(crate) fn close_plugin_window(app: &AppHandle, plugin_name: &str) -> Result<
     Ok(())
 }
 
-/// 从私有协议请求解析并读取当前插件目录中的静态资源。
+/**
+ * 从私有协议读取当前插件资源，另向各插件提供宿主内置的只读样式令牌。
+ * @param root 插件安装根目录。
+ * @param webview_label 请求来源窗口标识。
+ * @param request 当前资源请求。
+ * @returns 资源响应或未找到响应。
+ */
 pub(crate) fn serve_plugin_asset(
     root: &Path,
     webview_label: &str,
     request: http::Request<Vec<u8>>,
 ) -> http::Response<Vec<u8>> {
+    // 所有插件只共享宿主内置的只读 UI 样式，不开放其他插件的私有资源。
+    if request.uri().path() == "/_ui/theme.css" {
+        return http::Response::builder()
+            .status(http::StatusCode::OK)
+            .header(http::header::CONTENT_TYPE, "text/css; charset=utf-8")
+            .header("X-Content-Type-Options", "nosniff")
+            .body(include_bytes!("../resources/ui-theme.css").to_vec())
+            .unwrap_or_else(|_| http::Response::new(Vec::new()));
+    }
     match resolve_plugin_asset(root, webview_label, request.uri().path())
         .and_then(|path| fs::read(&path).map(|bytes| (path, bytes)).map_err(|error| error.to_string()))
     {
@@ -2823,8 +2838,8 @@ fn now_millis() -> u128 {
 #[cfg(test)]
 mod tests {
     use super::{
-        extract_plugin_zip, plugin_summary, preload_adapter_script, read_manifest,
-        resolve_plugin_asset, validate_market_download_url, PluginRuntime,
+        extract_plugin_zip, http, plugin_summary, preload_adapter_script, read_manifest,
+        resolve_plugin_asset, serve_plugin_asset, validate_market_download_url, PluginRuntime,
     };
     use std::{
         fs,
@@ -3001,6 +3016,24 @@ mod tests {
                 .is_ok()
         );
         fs::remove_dir_all(root).expect("asset fixture should clean up");
+    }
+
+    /**
+     * 验证共享样式只公开宿主内置 CSS，插件私有资源仍按原有边界隔离。
+     * @returns 无返回值。
+     */
+    #[test]
+    fn serves_shared_ui_theme_without_plugin_files() {
+        let root = fixture_root("theme-root");
+        fs::create_dir_all(&root).expect("theme fixture should exist");
+        let request = http::Request::builder()
+            .uri("/_ui/theme.css")
+            .body(Vec::new())
+            .unwrap();
+        let response = serve_plugin_asset(&root, "plugin-fixture", request);
+        assert_eq!(response.status(), http::StatusCode::OK);
+        assert!(String::from_utf8_lossy(response.body()).contains("--z-ui-accent"));
+        fs::remove_dir_all(root).expect("theme fixture should clean up");
     }
 
     /// 验证市场目录不能把下载器重定向到明文、本机或相似域名。
